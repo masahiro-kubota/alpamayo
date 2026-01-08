@@ -161,11 +161,15 @@ class AlpamayoR1(ReasoningVLA):
         }
         input_ids = self.fuse_traj_tokens(input_ids, traj_data_vlm)
         device = input_ids.device
+        
+        print(f"[DEBUG] input_ids fused. shape: {input_ids.shape}")
 
         # 1) run autoregressive generation for the VLM
         max_generation_length = kwargs.get(
             "max_generation_length", self.config.tokens_per_future_traj
         )
+        print(f"[DEBUG] Starting VLM generation. max_new_tokens: {max_generation_length}")
+        
         generation_config = self.vlm.generation_config
         generation_config.top_p = top_p
         generation_config.temperature = temperature
@@ -189,6 +193,7 @@ class AlpamayoR1(ReasoningVLA):
                 )
             ]
         )
+        print("[DEBUG] Generating tokens...")
         vlm_outputs = self.vlm.generate(
             input_ids=input_ids,
             generation_config=generation_config,
@@ -196,6 +201,7 @@ class AlpamayoR1(ReasoningVLA):
             logits_processor=logits_processor,
             **tokenized_data,
         )
+        print("[DEBUG] VLM generation finished.")
         vlm_outputs.rope_deltas = self.vlm.model.rope_deltas
 
         # manually replace padding after EOS token
@@ -219,6 +225,7 @@ class AlpamayoR1(ReasoningVLA):
                 )
         # [b_star], first occurrence position
         traj_future_start_positions = traj_future_start_mask.int().argmax(dim=1)
+        print(f"[DEBUG] Found traj_future_start_positions: {traj_future_start_positions}")
         last_token_positions = torch.full(
             (b_star,), vlm_outputs.sequences.shape[1] - 1, device=device
         )
@@ -288,6 +295,7 @@ class AlpamayoR1(ReasoningVLA):
         if diffusion_kwargs is None:
             diffusion_kwargs = {}
 
+        print(f"[DEBUG] Starting diffusion sampling. Batch size: {total_batch}")
         sampled_action = self.diffusion.sample(
             batch_size=total_batch,
             step_fn=step_fn,
@@ -295,6 +303,7 @@ class AlpamayoR1(ReasoningVLA):
             return_all_steps=False,
             **diffusion_kwargs,
         )
+        print(f"[DEBUG] Diffusion sampling finished.")
 
         # Repeat history to align with num_traj_samples
         hist_xyz_rep = einops.repeat(
