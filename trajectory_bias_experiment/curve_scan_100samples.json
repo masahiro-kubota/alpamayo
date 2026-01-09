@@ -1,0 +1,23 @@
+{
+  "threshold": 0.05,
+  "total_scanned": 1,
+  "high_curvature_count": 0,
+  "top_clips": [
+    {
+      "clip_id": "030c760c-ae38-49aa-9ad8-f5650a545d26",
+      "max_abs_curv": 0.0042163355535078315,
+      "mean_abs_curv": 0.001315325099217394,
+      "std_curv": 0.0016544497409314123,
+      "has_sharp_curve": false
+    }
+  ],
+  "all_results": [
+    {
+      "clip_id": "030c760c-ae38-49aa-9ad8-f5650a545d26",
+      "max_abs_curv": 0.0042163355535078315,
+      "mean_abs_curv": 0.001315325099217394,
+      "std_curv": 0.0016544497409314123,
+      "has_sharp_curve": false
+    }
+  ]
+}

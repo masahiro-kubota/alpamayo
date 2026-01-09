@@ -1,0 +1,17 @@
+[
+  {
+    "clip_id": "f789b390-1698-4f99-b237-6de4cbbb7666",
+    "description": "Radius ~3.6m, Curvature 0.277",
+    "error": "CUDA out of memory. Tried to allocate 380.00 MiB. GPU 0 has a total capacity of 23.53 GiB of which 367.69 MiB is free. Including non-PyTorch memory, this process has 23.16 GiB memory in use. Of the allocated memory 21.99 GiB is allocated by PyTorch, and 741.66 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)"
+  },
+  {
+    "clip_id": "34b09f15-9b59-4baf-ac4d-a51fdad7a85b",
+    "description": "Radius ~3.6m, Curvature 0.277",
+    "error": "CUDA out of memory. Tried to allocate 380.00 MiB. GPU 0 has a total capacity of 23.53 GiB of which 367.69 MiB is free. Including non-PyTorch memory, this process has 23.16 GiB memory in use. Of the allocated memory 21.99 GiB is allocated by PyTorch, and 741.66 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)"
+  },
+  {
+    "clip_id": "2ae4608f-2405-472e-81f1-2788b3912ac1",
+    "description": "Radius ~3.6m, Curvature 0.277",
+    "error": "CUDA out of memory. Tried to allocate 380.00 MiB. GPU 0 has a total capacity of 23.53 GiB of which 367.69 MiB is free. Including non-PyTorch memory, this process has 23.16 GiB memory in use. Of the allocated memory 21.99 GiB is allocated by PyTorch, and 741.66 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)"
+  }
+]
