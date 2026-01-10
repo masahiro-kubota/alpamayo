@@ -17,13 +17,13 @@
 ### 実行コマンド (Execution Command)
 ```bash
 # Low Temp
-python debug_viz.py --num_samples 4 --temperature 0.1 --top_p 0.90 --output debug_t0.1.png
+python ../../../debug_viz.py --num_samples 4 --temperature 0.1 --top_p 0.90 --output ../../images/debug_t0.1.png
 # Default
-python debug_viz.py --num_samples 4 --temperature 0.6 --output debug_t0.6.png
+python ../../../debug_viz.py --num_samples 4 --temperature 0.6 --output ../../images/debug_t0.6.png
 # High Temp
-python debug_viz.py --num_samples 4 --temperature 0.8 --output debug_t0.8.png
+python ../../../debug_viz.py --num_samples 4 --temperature 0.8 --output ../../images/debug_t0.8.png
 # Extreme
-python debug_viz.py --num_samples 4 --temperature 1.0 --output debug_t1.0.png
+python ../../../debug_viz.py --num_samples 4 --temperature 1.0 --output ../../images/debug_t1.0.png
 ```
 
 ### 結果 (Results)
@@ -59,7 +59,7 @@ python debug_viz.py \
   --num_samples 4 \
   --temperature 0.6 \
   --prompt "The lane ahead curves to the right. Follow the curve." \
-  --output debug_prompt_right.png
+  --output ../../images/debug_prompt_right.png
 ```
 
 ### 結果 (Results)
@@ -90,7 +90,7 @@ python debug_viz.py \
 # Attempt 1: N=20 -> CUDA OOM
 # Attempt 2: N=8  -> CUSOLVER Error
 # Attempt 3: N=4 (Sequential)
-python debug_viz.py --num_samples 4 --temperature 0.8 --output debug_samples_4_try1.png
+python ../../../debug_viz.py --num_samples 4 --temperature 0.8 --output ../../images/debug_samples_4_try1.png
 ```
 
 ### 結果 (Results)
@@ -104,7 +104,7 @@ python debug_viz.py --num_samples 4 --temperature 0.8 --output debug_samples_4_t
 *   `viz_samples_4_try1.log`
 
 ### 結果画像 (Visual Result)
-![Num Samples Result](debug_samples_4_try1.png)
+![Num Samples Result](../../images/debug_samples_4_try1.png)
 
 ### 考察 (Discussion)
 ハードウェア制約により大規模な並列生成 ($N \ge 20$) は困難。また、仮に生成できたとしても、以下の評価関数が欠如しているため、自動選別ができない。
@@ -124,7 +124,7 @@ python debug_viz.py --num_samples 4 --temperature 0.8 --output debug_samples_4_t
 
 ### 実行コマンド (Execution Command)
 ```bash
-python debug_viz.py --num_samples 4 --temperature 0.6 --top_p 1.0 --output debug_topp_1.0.png
+python ../../../debug_viz.py --num_samples 4 --temperature 0.6 --top_p 1.0 --output ../../images/debug_topp_1.0.png
 ```
 
 ### 結果 (Results)
@@ -137,7 +137,7 @@ python debug_viz.py --num_samples 4 --temperature 0.6 --top_p 1.0 --output debug
 *   `viz_topp_1.0.log`
 
 ### 結果画像 (Visual Result)
-![Top-P 1.0 Result](debug_topp_1.0.png)
+![Top-P 1.0 Result](../../images/debug_topp_1.0.png)
 > **Note**: 赤/青/緑などの各線は生成された4本の軌道を示しています。一本だけ大きく左に振れている（あるいは右に振れている）軌道があれば、それが「裾野」を拾った結果です。
 > 
 > **ユーザー指摘**: 「曲がっている」と言っても、実際には0.95m程度の横方向偏差であり、本来必要な「カーブ追従」には程遠い（ほぼ直進）状態です。この結果は**推論パラメータ調整の限界**を如実に示しており、根本的な解決にはFine-tuningが不可欠であることを裏付けています。

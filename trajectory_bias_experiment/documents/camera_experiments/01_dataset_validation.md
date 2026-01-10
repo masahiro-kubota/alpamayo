@@ -20,12 +20,12 @@
 
 ### 1. カーブシーン探索
 ```bash
-python find_curve_clips.py
+python ../../../find_curve_clips.py
 ```
 
 ### 2. 公式推論テスト
 ```bash
-python src/alpamayo_r1/test_inference.py
+python ../../../src/alpamayo_r1/test_inference.py
 ```
 
 ---

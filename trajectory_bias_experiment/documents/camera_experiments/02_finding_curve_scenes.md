@@ -125,7 +125,7 @@ Max Lateral Deviation: 9.493m
 **考察**:
 思考（CoC）でカーブを正しく認識し、出力軌道も9.5mの旋回を描いている。4枚のカメラ画像があれば、モデルは極めて急なカーブでも予測可能であることが証明された。
 
-![4-Camera Test Result](4cam_test_f789b390.png)
+![4-Camera Test Result](../../images/4cam_test_f789b390.png)
 
 ---
 
@@ -148,7 +148,7 @@ Max Lateral Deviation: 0.009m
 **致命的な「思考・行動の解離」(Reasoning-Action Disconnect) が発生。**
 思考（VLM部分）は「右に曲がる」と正しく判断しているが、出力軌道（Diffusion Policy部分）は**0.009mというほぼ完全な直進**を出力した。
 
-![Front-Only Test Result](front_only_test_f789b390.png)
+![Front-Only Test Result](../../images/front_only_test_f789b390.png)
 
 ---
 
@@ -171,7 +171,7 @@ minADE: 9.559m
 フロントカメラを正しい位置に入力することで、横方向偏差が **0.01m → 0.42m** へとわずかに改善したが、依然として目標（9.5m）には遠く及ばない。
 これは、直進バイアスの原因が「位置エンコーディングの不整合」だけでなく、**「旋回に必要な視覚的特徴（サイドカメラの情報）の欠如」**にあることを強く示唆している。
 
-![B-F-B-B Test Result](bfbb_test_f789b390.png)
+![B-F-B-B Test Result](../../images/bfbb_test_f789b390.png)
 
 ---
 
@@ -182,7 +182,7 @@ minADE: 9.559m
 ### 1. データセット解析 (Analysis)
 *   **`scan_all_curves.py`**: データセット全体をサンプリングして高曲率クリップを網羅的に検索します。
     ```bash
-    python scan_all_curves.py --threshold 0.05 --max_clips 500 --output curve_scan_500samples.json
+    python ../../../scan_all_curves.py --threshold 0.05 --max_clips 500 --output ../../logs/curve_scan_500samples.json
     ```
 *   **`find_curve_clips.py`**: 特定のクリップの曲率をクイックに確認、または曲率順にソートして表示します。
     ```bash
@@ -192,17 +192,16 @@ minADE: 9.559m
 ### 2. 推論・検証 (Inference & Verification)
 *   **`test_high_curves.py`**: 抽出された高曲率クリップリスト（JSON）に対して一括で推論を実行し、統計を計算します。
     ```bash
-    python test_high_curves.py --input curve_scan_500samples.json --num_traj_samples 1
+    python ../../../../test_high_curves.py --input ../../../logs/curve_scan_500samples.json --num_traj_samples 1
     ```
 *   **`test_single_curve.py`**: 特定の1クリップに対してメモリ効率よく推論を実行し、数値結果を表示します。
     ```bash
-    python test_single_curve.py <clip_id>
-    ```
+    python ../../../test_single_curve.py --clip_token_index 4400 --output_dir . ```
 
 ### 3. 可視化 (Visualization)
 *   **`test_4cam_viz.py`**: 4カメラ入力＋思考＋軌道の総合的な可視化画像を生成します。
     ```bash
-    python test_4cam_viz.py <clip_id>
+    python ../test_4cam_viz.py <clip_id>
     ```
 *   **`test_front_only.py`**: フロントカメラ1枚のみを入力とした場合のアブレーション実験用です。
     ```bash
