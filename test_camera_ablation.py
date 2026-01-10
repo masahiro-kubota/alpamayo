@@ -136,34 +136,50 @@ def main():
     n_cams = len(viz_images)
     fig = plt.figure(figsize=(24, 14))
     
-    # Consistent layout if padding: 2x2 for cameras if 4 cameras
-    if args.padding:
-        gs = GridSpec(3, 3, figure=fig, height_ratios=[1, 1, 1.5], width_ratios=[1, 1, 0.8])
-        # Cam 0, 1, 2, 3 locations
-        cam_locs = [(0,0), (0,1), (1,0), (1,1)]
+    # Always use 2x2 layout for cameras
+    gs = GridSpec(3, 3, figure=fig, height_ratios=[1, 1, 1.5], width_ratios=[1, 1, 0.8])
+    
+    # Camera positions: always 2x2 grid
+    # If less than 4 cameras, fill remaining slots with placeholder
+    cam_locs = [(0,0), (0,1), (1,0), (1,1)]
+    all_camera_names = ['Cross Left 120', 'Front Wide 120', 'Cross Right 120', 'Front Tele 30']
+    
+    for slot_idx in range(4):
+        ax = fig.add_subplot(gs[cam_locs[slot_idx][0], cam_locs[slot_idx][1]])
+        slot_name = all_camera_names[slot_idx]
         
-        for i, (name, img) in enumerate(zip(selected_camera_names, viz_images)):
-             ax = fig.add_subplot(gs[cam_locs[i][0], cam_locs[i][1]])
-             ax.imshow(img)
-             ax.set_title(f"#{i}: {name}", fontsize=12, fontweight='bold')
-             ax.axis('off')
-        
-        # CoT
-        ax_coc = fig.add_subplot(gs[0:2, 2])
-        # Traj
-        ax_traj = fig.add_subplot(gs[2, :])
-        
-    else:
-        # Variable length layout (linear)
-        gs = GridSpec(2, n_cams + 1, figure=fig, height_ratios=[1, 1])
-        for i, (name, img) in enumerate(zip(selected_camera_names, viz_images)):
-            ax = fig.add_subplot(gs[0, i])
+        # Check if this slot has an image
+        if args.padding:
+            # Padding mode: all 4 slots filled, black images for missing
+            img = viz_images[slot_idx]
+            is_black = slot_idx not in cam_indices
+            label = f"#{slot_idx}: {slot_name}" + (" [BLACK]" if is_black else "")
             ax.imshow(img)
-            ax.set_title(f"#{cam_indices[i]}: {name}", fontsize=12, fontweight='bold')
-            ax.axis('off')
-        
-        ax_coc = fig.add_subplot(gs[0, n_cams])
-        ax_traj = fig.add_subplot(gs[1, :])
+            ax.set_title(label, fontsize=12, fontweight='bold', 
+                        color='red' if is_black else 'black')
+        else:
+            # Variable length: only show selected cameras
+            if slot_idx < n_cams:
+                img = viz_images[slot_idx]
+                cam_idx = cam_indices[slot_idx]
+                label = f"#{cam_idx}: {selected_camera_names[slot_idx]}"
+                ax.imshow(img)
+                ax.set_title(label, fontsize=12, fontweight='bold')
+            else:
+                # Empty slot
+                ax.text(0.5, 0.5, f"(Not Used)\n{slot_name}", 
+                       ha='center', va='center', fontsize=14, color='gray',
+                       transform=ax.transAxes)
+                ax.set_facecolor('#f0f0f0')
+                ax.set_title(f"#{slot_idx}: {slot_name} [EMPTY]", fontsize=12, color='gray')
+        ax.axis('off')
+    
+    # CoT panel
+    ax_coc = fig.add_subplot(gs[0:2, 2])
+    # Trajectory panel
+    # Trajectory panel
+    ax_traj = fig.add_subplot(gs[2, :])
+
 
     # CoT on the right of cameras
     # ax_coc is already created above
@@ -198,7 +214,7 @@ Metrics:
     plt.savefig(args.output, dpi=100)
     print(f"✓ Visualization saved: {args.output}\n")
     
-    print(f"RESULTS: MaxDev={max_lateral_dev:.3f}m | CoT={coc_text[:50]}...")
+    print(f"RESULTS: MaxDev={max_lateral_dev:.3f}m | minADE={min_ade:.3f}m | CoT={coc_text[:50]}...")
 
 if __name__ == "__main__":
     main()
