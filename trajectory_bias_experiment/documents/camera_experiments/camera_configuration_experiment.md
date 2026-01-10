@@ -91,7 +91,7 @@ python test_camera_ablation.py f789b390-1698-4f99-b237-6de4cbbb7666 --cameras 0,
 **実行結果**:
 - **Max Deviation**: **6.45 m**
 - **判定**: **Sueccess**。カーブを認識して曲がれているが、4眼フル（~9.5m）よりは精度低下。
-- **Log**: `../../logs/test_inference_output.log`
+- **Log**: [`../../logs/case1_no_tele.log`](../../logs/case1_no_tele.log)
 ![No Tele Result](../../images/ablation_cam012_f789b390.png)
 
 #### Case 2: Teleなし・黒埋め (Fail-Soft Padding)
@@ -105,39 +105,68 @@ python test_camera_ablation.py f789b390-1698-4f99-b237-6de4cbbb7666 --cameras 0,
 **実行結果**:
 - **Max Deviation**: **9.50 m**
 - **判定**: **Perfect**。ベースラインと同等の最高性能。Teleの画素情報は不要だが、4眼の入力構造維持が重要であることを示唆。
+- **Log**: [`../../logs/case2_no_tele_pad.log`](../../logs/case2_no_tele_pad.log)
 ![No Tele Padding Result](../../images/ablation_cam012_pad_f789b390.png)
 
 #### Case 3: フロントのみ (Front Only / Variable)
-サイドカメラ（Left/Right）を削除し、FrontとTeleのみを入力します。
+サイドカメラ（Left/Right）とTeleカメラを削除し、Front Wide（120°）**1枚のみ**を入力します。
 
 ```bash
 # 3. フロントのみ (Variable)
-python test_camera_ablation.py f789b390-1698-4f99-b237-6de4cbbb7666 --cameras 1,3
+# Index 1: Front Wide
+python test_camera_ablation.py f789b390-1698-4f99-b237-6de4cbbb7666 --cameras 1
 ```
 
 **実行結果**:
-- **Max Deviation**: **0.14 m**
+- **Max Deviation**: **0.01 m**
 - **判定**: **Failure** (完全直進)。
 - 思考（Reasoning）では「右カーブ」と言っているが、行動（Action）は直進。インデックスずれ（Front画像がIndex 0に入り、Left画像として誤認された）が疑われる。
+- **Log**: [`../../logs/case3_front_only.log`](../../logs/case3_front_only.log)
 ![Front Only Result](../../images/ablation_cam13_f789b390.png)
 
 #### Case 4: フロントのみ・黒埋め (Front Only / Padding)
-サイドカメラを黒画像で埋めて順序を維持します。
+Front Wideのみを残し、他3枚（Left, Right, Tele）を黒画像で埋めます。
 
 ```bash
 # 4. フロントのみ・黒埋め (Padding)
-python test_camera_ablation.py f789b390-1698-4f99-b237-6de4cbbb7666 --cameras 1,3 --padding
+python test_camera_ablation.py f789b390-1698-4f99-b237-6de4cbbb7666 --cameras 1 --padding
 ```
 
 **実行結果**:
-- **Max Deviation**: **3.36 m**
+- **Max Deviation**: **0.42 m**
 - **判定**: **Partial**。Variable (0.14m) よりはマシだが、曲がりきれず。サイドカメラの幾何学的情報が必須であることを証明。
+- **Log**: [`../../logs/case4_front_only_pad.log`](../../logs/case4_front_only_pad.log)
 ![Front Only Padding Result](../../images/ablation_cam13_pad_f789b390.png)
+
+#### Case 5: 順序入れ替え (Permuted Order)
+入力画像の順序を意図的に入れ替えることで、モデルが「どのスロットにどのカメラが入っているか」をIndex順序に依存して判断しているかを検証します。
+
+```bash
+# 5. 順序入れ替え (Front, Left, Right, Tele)
+# Regular: Left(0), Front(1), Right(2), Tele(3) -> Permuted: Front(1), Left(0), Right(2), Tele(3)
+python test_camera_ablation.py f789b390-1698-4f99-b237-6de4cbbb7666 --cameras 1,0,2,3
+```
+
+**実行結果**:
+- **Log**: [`../../logs/case5_permuted.log`](../../logs/case5_permuted.log)
+- **Max Deviation**: **9.23 m**
+- **判定**: **Success** (Surprisingly)。
+- **考察**: 画像の入力順序を入れ替えても、パディングなしのVariable Length入力においてモデルはある程度のロバスト性を示しました。これは、モデルが位置埋め込み（Positional Embedding）や視覚特徴から各カメラの役割をある程度識別できている可能性、あるいはこの特定の並び替え（Front <-> Left）が致命的ではなかった可能性を示唆しています。しかし、標準順序（Case 2: 9.50m）よりはわずかに性能が低下しています。
+![Permuted Order Result](../../images/ablation_cam1023_f789b390.png)
 
 ## 5. 結果のまとめ (Results Summary)
 
 4つのアブレーション実験の結果をまとめると以下の通りです。
-サイドカメラ（Left/Right）の欠損が最も致命的であり、カメラを減らす場合でも黒画像パディング（Padding）で構造を維持することがロバスト性に寄与することがわかります。
+サイドカメラ（Left/Right）の欠損が最も致命的であり（Case 3, 4）、カメラを減らす場合でも黒画像パディング（Padding）で構造を維持することがロバスト性に寄与することがわかります。
+また、Case 5の順序入れ替え実験では、意外にも高い性能（9.23m）が維持されましたが、やはり標準順序（9.50m）が最も高いパフォーマンスを発揮しました。
+
+| ID | 条件 (Condition) | 入力形式 (Input Type) | カメラ構成 (Cameras) | Max Dev | 結果 (Result) |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **1** | **Teleなし** | Variable Length | Left, Front, Right | **6.45 m** | **Success** (Curved) |
+| **2** | **Teleなし・黒埋め** | Padding (Black) | Left, Front, Right, *Black* | **9.50 m** | **Success** (Perfect) |
+| **3** | **フロントのみ** | Variable Length | Front, Tele | **0.01 m** | **Failure** (Straight) |
+| **4** | **フロントのみ・黒埋め** | Padding (Black) | *Black*, Front, *Black*, Tele | **0.42 m** | **Failure** (Straight) |
+| **5** | **順序入れ替え** | Permuted | Front, Left, Right, Tele | **9.23 m** | **Success** (Good) |
 
 | ID | 条件 (Condition) | 入力形式 | カメラ構成 | Max Deviation | 結果 |
 | :--- | :--- | :--- | :--- | :--- | :--- |

@@ -1,34 +1,43 @@
 #!/bin/bash
-# Activate venv
-if [ -d "ar1_venv" ]; then
-    source ar1_venv/bin/activate
-else
+set -e
+
+# Ensure venv exists and activate
+if [ ! -d "ar1_venv" ]; then
     echo "Creating venv..."
     python3 -m venv ar1_venv
-    source ar1_venv/bin/activate
 fi
+source ar1_venv/bin/activate
 
-# Install dependencies just in case
-pip install -e .
-pip install matplotlib torch numpy
+# Install dependencies if needed
+pip install matplotlib torch numpy scipy || true
 
-# Create logs dir
+# Helper function to run experiment
+run_exp() {
+    CLIP="f789b390-1698-4f99-b237-6de4cbbb7666"
+    NAME=$1
+    ARGS=$2
+    LOG="trajectory_bias_experiment/logs/${NAME}.log"
+    echo "Running Case: ${NAME} with args: ${ARGS}"
+    python3 -u test_camera_ablation.py $CLIP $ARGS > "$LOG" 2>&1
+    echo "Finished ${NAME}. Log: ${LOG}"
+}
+
 mkdir -p trajectory_bias_experiment/logs
 
-echo "Running Case 1..."
-python test_camera_ablation.py f789b390-1698-4f99-b237-6de4cbbb7666 --cameras 0,1,2 > trajectory_bias_experiment/logs/case1_no_tele.log 2>&1
+# Case 1: No Tele (Variable)
+run_exp "case1_no_tele" "--cameras 0,1,2"
 
-echo "Running Case 2..."
-python test_camera_ablation.py f789b390-1698-4f99-b237-6de4cbbb7666 --cameras 0,1,2 --padding > trajectory_bias_experiment/logs/case2_no_tele_pad.log 2>&1
+# Case 2: No Tele (Padding)
+run_exp "case2_no_tele_pad" "--cameras 0,1,2 --padding"
 
-echo "Running Case 3..."
-python test_camera_ablation.py f789b390-1698-4f99-b237-6de4cbbb7666 --cameras 1,3 > trajectory_bias_experiment/logs/case3_front_only.log 2>&1
+# Case 3: Front Only (1 camera)
+run_exp "case3_front_only" "--cameras 1"
 
-echo "Running Case 4..."
-python test_camera_ablation.py f789b390-1698-4f99-b237-6de4cbbb7666 --cameras 1,3 --padding > trajectory_bias_experiment/logs/case4_front_only_pad.log 2>&1
+# Case 4: Front Only (Padding)
+run_exp "case4_front_only_pad" "--cameras 1 --padding"
 
-echo "Running Case 5 (Permutation)..."
-# Standard order is 0,1,2,3. We swap 0 (Left) and 1 (Front) -> 1,0,2,3
-python test_camera_ablation.py f789b390-1698-4f99-b237-6de4cbbb7666 --cameras 1,0,2,3 > trajectory_bias_experiment/logs/case5_permuted.log 2>&1
+# Case 5: Permutation (Front, Left, Right, Tele -> 1,0,2,3)
+# Standard is 0(Left), 1(Front), 2(Right), 3(Tele)
+run_exp "case5_permuted" "--cameras 1,0,2,3"
 
-echo "All experiments completed."
+echo "All experiments completed. Logs and images are generated."
