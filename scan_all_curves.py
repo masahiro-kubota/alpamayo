@@ -16,45 +16,44 @@ from tqdm import tqdm
 import pandas as pd
 
 
-def analyze_clip_curvature(avdi, clip_id, t0_us=5_100_000, sample_window_us=6_000_000):
-    """Analyze curvature characteristics of a clip.
-    
-    Args:
-        avdi: PhysicalAIAVDatasetInterface instance
-        clip_id: Clip ID to analyze
-        t0_us: Center timestamp to analyze around
-        sample_window_us: Time window to sample (default 6s = ±3s)
-        
-    Returns:
-        dict with curvature statistics or None if error
-    """
-    try:
-        egomotion = avdi.get_clip_feature(
-            clip_id,
-            avdi.features.LABELS.EGOMOTION,
-            maybe_stream=True,
-        )
-        
-        # Sample curvature around t0 (±3 seconds at 10Hz)
-        half_window = sample_window_us // 2
-        timestamps = np.arange(
-            t0_us - half_window,
-            t0_us + half_window,
-            100_000,  # 0.1s = 10Hz
-        ).astype(np.int64)
-        
-        ego_data = egomotion(timestamps)
-        curvatures = ego_data.curvature
-        
-        return {
-            'clip_id': clip_id,
-            'max_abs_curv': float(np.abs(curvatures).max()),
-            'mean_abs_curv': float(np.abs(curvatures).mean()),
-            'std_curv': float(curvatures.std()),
-            'has_sharp_curve': bool(np.abs(curvatures).max() > 0.05),
-        }
-    except Exception as e:
-        return {'clip_id': clip_id, 'error': str(e)}
+import time
+
+def analyze_clip_curvature(avdi, clip_id, t0_us=5_100_000, sample_window_us=6_000_000, retries=5):
+    """Analyze curvature characteristics of a clip with retries for network resilience."""
+    last_error = None
+    for attempt in range(retries):
+        try:
+            egomotion = avdi.get_clip_feature(
+                clip_id,
+                avdi.features.LABELS.EGOMOTION,
+                maybe_stream=True,
+            )
+            
+            # Sample curvature around t0 (±3 seconds at 10Hz)
+            half_window = sample_window_us // 2
+            timestamps = np.arange(
+                t0_us - half_window,
+                t0_us + half_window,
+                100_000,  # 0.1s = 10Hz
+            ).astype(np.int64)
+            
+            ego_data = egomotion(timestamps)
+            curvatures = ego_data.curvature
+            
+            return {
+                'clip_id': clip_id,
+                'max_abs_curv': float(np.abs(curvatures).max()),
+                'mean_abs_curv': float(np.abs(curvatures).mean()),
+                'std_curv': float(curvatures.std()),
+                'has_sharp_curve': bool(np.abs(curvatures).max() > 0.05),
+            }
+        except Exception as e:
+            last_error = str(e)
+            if attempt < retries - 1:
+                time.sleep(1.0 * (attempt + 1))  # Exponential backoff
+            continue
+            
+    return {'clip_id': clip_id, 'error': last_error}
 
 
 def main():

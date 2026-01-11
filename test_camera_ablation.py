@@ -79,15 +79,24 @@ def main():
         input_list = []
         dummy_black = torch.zeros_like(all_image_frames[0]) # (num_frames, 3, H, W)
         
-        for i in range(4):
-            if i in cam_indices:
-                input_list.append(all_image_frames[i])
-                viz_images.append(all_image_frames[i, -1].permute(1, 2, 0).numpy())
-                selected_camera_names.append(STD_CAMERA_NAMES[i])
-            else:
-                input_list.append(dummy_black)
-                viz_images.append(np.zeros((all_image_frames.shape[-2], all_image_frames.shape[-1], 3), dtype=np.uint8))
-                selected_camera_names.append(f"{STD_CAMERA_NAMES[i]} (BLACK)")
+        if len(cam_indices) == 4:
+            # Full permutation mode: Trust user order completely (e.g. for Swap experiments)
+            for i in range(4):
+                cam_idx = cam_indices[i]
+                input_list.append(all_image_frames[cam_idx])
+                viz_images.append(all_image_frames[cam_idx, -1].permute(1, 2, 0).numpy())
+                selected_camera_names.append(STD_CAMERA_NAMES[cam_idx])
+        else:
+            # Subset mode: Preserve geometry (Sort to fixed slots)
+            for i in range(4):
+                if i in cam_indices:
+                    input_list.append(all_image_frames[i])
+                    viz_images.append(all_image_frames[i, -1].permute(1, 2, 0).numpy())
+                    selected_camera_names.append(STD_CAMERA_NAMES[i])
+                else:
+                    input_list.append(dummy_black)
+                    viz_images.append(np.zeros((all_image_frames.shape[-2], all_image_frames.shape[-1], 3), dtype=np.uint8))
+                    selected_camera_names.append(f"{STD_CAMERA_NAMES[i]} (BLACK)")
         
         input_image_frames = torch.stack(input_list) # (4, num_frames, 3, H, W)
         
@@ -152,17 +161,24 @@ def main():
         if args.padding:
             # Padding mode: all 4 slots filled, black images for missing
             img = viz_images[slot_idx]
-            is_black = slot_idx not in cam_indices
-            label = f"#{slot_idx}: {slot_name}" + (" [BLACK]" if is_black else "")
+            is_black = "BLACK" in selected_camera_names[slot_idx]
+            
+            # Show "Slot Name -> Content Name" if they differ (Permutation) or match
+            content_name = selected_camera_names[slot_idx]
+            label = f"Slot {slot_idx}: {slot_name}\n[{content_name}]"
+            
             ax.imshow(img)
-            ax.set_title(label, fontsize=12, fontweight='bold', 
+            ax.set_title(label, fontsize=10, fontweight='bold', 
                         color='red' if is_black else 'black')
         else:
-            # Variable length: only show selected cameras
-            if slot_idx < n_cams:
-                img = viz_images[slot_idx]
-                cam_idx = cam_indices[slot_idx]
-                label = f"#{cam_idx}: {selected_camera_names[slot_idx]}"
+            # Variable length: check if this specific camera slot was requested
+            if slot_idx in cam_indices:
+                # Find the image corresponding to this camera index in the packed list
+                # val_idx is the index in the 'cam_indices' list provided by user
+                val_idx = cam_indices.index(slot_idx)
+                img = viz_images[val_idx]
+                
+                label = f"#{slot_idx}: {slot_name}"
                 ax.imshow(img)
                 ax.set_title(label, fontsize=12, fontweight='bold')
             else:
