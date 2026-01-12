@@ -21,7 +21,7 @@ def load_data(pt_file):
 def evaluate(args):
     # 1. Config & Model
     print("Loading Model...")
-    model = AlpamayoR1.from_pretrained(args.base_model, trust_remote_code=True)
+    model = AlpamayoR1.from_pretrained(args.base_model, trust_remote_code=True, torch_dtype=torch.bfloat16)
     device = "cuda"
     
     model.to(device)

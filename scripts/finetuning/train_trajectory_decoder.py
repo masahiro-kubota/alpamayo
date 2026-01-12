@@ -167,7 +167,8 @@ def train(args):
     print("Loading Model Config...")
     config = AutoConfig.from_pretrained(args.model_path, trust_remote_code=True)
     print("Loading Model...")
-    model = AlpamayoR1.from_pretrained(args.model_path) # Use from_pretrained for real path
+    # Load in bfloat16 to save memory (fits in 24GB VRAM)
+    model = AlpamayoR1.from_pretrained(args.model_path, torch_dtype=torch.bfloat16) 
     device = "cuda"
 
     model.to(device)
