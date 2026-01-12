@@ -1,5 +1,9 @@
 
 import os
+# Ensure HF cache goes to /workspace where there's disk space
+os.environ.setdefault("HF_HOME", "/workspace/hf")
+os.environ.setdefault("TRANSFORMERS_CACHE", "/workspace/hf/transformers")
+os.environ.setdefault("HF_DATASETS_CACHE", "/workspace/hf/datasets")
 import sys
 import torch
 import torch.nn as nn
@@ -29,6 +33,47 @@ class TrajectoryDataset(Dataset):
         item = self.data[idx]
         # Return dict with tensors on CPU
         return item
+
+def custom_collate_fn(batch):
+    """Custom collate function to handle nested dicts with tensors."""
+    # batch is a list of dicts
+    collated = {}
+    
+    # Handle tokenized_data separately (nested dict)
+    tokenized_keys = batch[0]["tokenized_data"].keys()
+    collated["tokenized_data"] = {}
+    for key in tokenized_keys:
+        tensors = [item["tokenized_data"][key] for item in batch if item["tokenized_data"][key] is not None]
+        if tensors:
+            # Pad sequences to same length for input_ids and attention_mask
+            if key in ["input_ids", "attention_mask"]:
+                max_len = max(t.shape[0] for t in tensors)
+                padded = []
+                for t in tensors:
+                    if t.shape[0] < max_len:
+                        pad_size = max_len - t.shape[0]
+                        if key == "input_ids":
+                            padding = torch.zeros(pad_size, dtype=t.dtype)  # pad with 0
+                        else:
+                            padding = torch.zeros(pad_size, dtype=t.dtype)  # attention_mask pad
+                        t = torch.cat([t, padding])
+                    padded.append(t)
+                collated["tokenized_data"][key] = torch.stack(padded)
+            else:
+                collated["tokenized_data"][key] = torch.stack(tensors)
+        else:
+            collated["tokenized_data"][key] = None
+    
+    # Handle trajectory tensors - concatenate along batch dim (dim 0)
+    for key in ["ego_future_xyz", "ego_future_rot", "ego_history_xyz", "ego_history_rot"]:
+        tensors = [item[key] for item in batch]
+        collated[key] = torch.cat(tensors, dim=0)  # (B, 1, T, ...) -> (B*batch_size, 1, T, ...)
+    
+    # Handle non-tensor fields
+    collated["split"] = [item["split"] for item in batch]
+    collated["clip_id"] = [item["clip_id"] for item in batch]
+    
+    return collated
 
 def compute_flow_matching_loss(model: AlpamayoR1, batch):
     """
@@ -117,7 +162,16 @@ def compute_flow_matching_loss(model: AlpamayoR1, batch):
     # 4. Neural Network Head Forward (Predict v_t)
     # Project x_t to embedding dimension
     # t is also passed to projection (Time embedding)
-    future_token_embeds = model.action_in_proj(x_t, t) 
+    # From flow_matching.py: t_start = time_steps[i].view(1, 1, 1).expand(batch_size, 1, 1)
+    # So t should be (B, 1, 1) not (B, T, 1)
+    t_for_proj = t.view(batch_size, 1, 1)  # (B,) -> (B, 1, 1)
+    
+    # Cast to model dtype (bfloat16)
+    model_dtype = next(model.action_in_proj.parameters()).dtype
+    x_t = x_t.to(dtype=model_dtype)
+    t_for_proj = t_for_proj.to(dtype=model_dtype)
+    
+    future_token_embeds = model.action_in_proj(x_t, t_for_proj) 
     # (B, Tf, hidden_size)
 
     # Position IDs for future tokens
@@ -137,7 +191,8 @@ def compute_flow_matching_loss(model: AlpamayoR1, batch):
     # We construct mask matching expert call in inference.
     attention_mask_expert = torch.ones(
         (batch_size, 1, n_diffusion_tokens, seq_len + n_diffusion_tokens),
-        device=device
+        device=device,
+        dtype=model_dtype  # Match model dtype to avoid attention bias dtype error
     )
     
     # Run Expert
@@ -157,6 +212,8 @@ def compute_flow_matching_loss(model: AlpamayoR1, batch):
     v_pred = model.action_out_proj(last_hidden) # (B, Tf, C_action)
     
     # 5. Loss Calculation
+    # Cast u_t to model dtype to match v_pred
+    u_t = u_t.to(dtype=v_pred.dtype)
     loss = nn.functional.mse_loss(v_pred, u_t)
     
     return loss
@@ -194,7 +251,7 @@ def train(args):
     # 3. Data
     print(f"Loading Dataset from {args.data_path}...")
     dataset = TrajectoryDataset(args.data_path)
-    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
+    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, collate_fn=custom_collate_fn)
     
     # 4. Training Loop
     model.train()
