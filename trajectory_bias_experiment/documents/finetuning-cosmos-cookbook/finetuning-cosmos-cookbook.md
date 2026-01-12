@@ -1,4 +1,4 @@
-# 検証レポート: Cosmos Cookbook ファインチューニング適用可能性 (Finetuning Feasibility)
+# Alpamayo R1 を finetuningする (Finetuning Alpamayo R1)
 
 ## TL;DR
 **「直進バイアス」の修正に、Cosmos Cookbook は使用できない。**
@@ -88,8 +88,18 @@ Alpamayo は単なる VLM ではなく、**「脳 (VLM) + 手足 (Diffusion)」�
     *   「カーブがあることを認識させる」ために VLM 部分を再学習することは、Cookbook で可能です。
     *   学習データ生成プロセスにおいて、Teacher (Qwen-72B) から蒸留された「正しい推論」を VLM に教えることができます。
 *   **Trajectory (軌道) の修正**: **不可能**
-    *   直進バイアスの主因である Trajectory Decoder は **Diffusion Model** です。
-    *   Cosmos Cookbook には、**Diffusion Loss (MSE / Flow Matching Loss) を計算する機能も、Diffusion Head の重みを更新する機能もありません。**
+    *   直進バイアスこの Head を再学習させるには、Cookbook ではなく、**Trajectory Loss を扱える Alpamayo-R1 独自の学習コード（DeepSpeed実装）** を使用する必要があります。
+
+#### Q. Trajectory Decoder の追加学習で、単眼でも適切な軌道を出力できるか？
+**Answer: はい、理論上は可能です（それが本命の解決策です）。**
+
+*   **理由**: 現在の「直進バイアス」は、モデルが「360度カメラがある前提」の学習済み重みを持っており、単眼（前方のみ）の入力だと情報不足で「安全側に倒して直進する」ような分布を学習してしまっている可能性があります。
+*   **解決策**: 「単眼画像 (Front Camera)」と「正解の曲がる軌道 (Ground Truth Trajectory)」のペアだけを集めたデータセットで Trajectory Decoder（拡散モデル）を再学習（Fine-tuning）させます。
+*   **効果**: これにより、拡散モデルは「前方画像の特徴（カーブの白線など）」**だけ** を手がかりにして、適切な曲率の軌道を生成する分布 `p(trajectory | single_image)` を獲得できるようになります。
+
+---
+
+## (Appendix) おまけ: Cosmos Cookbook でファインチューニングを実行するには、**Diffusion Loss (MSE / Flow Matching Loss) を計算する機能も、Diffusion Head の重みを更新する機能もありません。**
 
 ## 5. 結果のまとめ (Results Summary)
 
@@ -100,31 +110,103 @@ Alpamayo は単なる VLM ではなく、**「脳 (VLM) + 手足 (Diffusion)」�
 | **Cosmos-Reason Backbone** | 画像認識・思考・CoT記述 | **Yes** (SFT Recipe) | VLMのテキスト生成タスクであるため。 |
 | **Trajectory Decoder** | **実走行軌道の生成 (今回の課題)** | **No** | **拡散モデルであり、Cookbookの学習範疇外のため。** |
 
-### Conclusion
-**Cosmos Cookbook は使えません。**
-今回の「カメラ構成変更による直進バイアス」は、Trajectory Decoder (Diffusion Head) が特定の入力特徴量（Camera ID等）に過剰適合していることが主因と考えられます。
-この Head を再学習させるには、Cookbook ではなく、**Trajectory Loss を扱える Alpamayo-R1 独自の学習コード（DeepSpeed実装）** を使用する必要があります。
+### (Solution) Trajectory Decoder の追加学習手順
+Cookbook は使用せず、今回作成した独自の学習スクリプトを用いて学習を実施します。
 
----
-
-## (Appendix) おまけ: Cosmos Cookbook でファインチューニングを実行する
-
-「使えない」という結論だけではイメージが湧きづらいため、もし「脳 (Brain)」だけを鍛え直すとしたらどのようなコマンドになるのか、Cookbook の **Post-Training (SFT)** レシピを例に示します。
-
-#### 1. 実行レシピ
-`recipes/post_training/reason2/video_caption_vqa` (Uberのデータセットを使ったAVキャプション生成の追加学習)
-
-#### 2. 実行コマンド (SFT)
-Cookbook では `cosmos-rl` というコマンドラインツールを使って学習を実行します。
+#### Step 0: 環境構築 (Environment Setup)
+GPU環境にて、以下の手技でセットアップを行います。
+`uv` をお使いの場合は、`pyproject.toml` の同期後に不足しているライブラリを追加します。
 
 ```bash
-# SFTの実行例 (Cosmos Reason 2)
-# 設定ファイル(toml)を指定して学習を開始します
-cosmos-rl --config config/uber_sft_blended.toml scripts/uber_dataloader.py
+# uv を使用する場合 (推奨)
+# 基本ライブラリは pyproject.toml に含まれていますが、datasets のみ追加が必要です。
+uv add datasets
+
+# パスの設定 (srcをPYTHONPATHに追加)
+export PYTHONPATH=$PYTHONPATH:$(pwd)/src
 ```
 
-これだけで、`uber_sft_blended.toml` に定義されたパラメータ（学習率、エポック数、LoRA設定など）に従って、QwenベースのVLMの再学習が始まります。
+#### Step 1: データセットの準備 (Data Prep)
+Hugging Face 上の `nvidia/PhysicalAI-Autonomous-Vehicles` データセットから、学習データを抽出・作成します。
 
-#### 3. なぜこれで Trajectory が直らないのか？
-この学習を実行すると、VLMは「Uber風の状況説明」を学習します。しかし、**「ハンドルを何度切るか（＝Trajectory Decoderの重み）」を更新するプロセスがこのコマンドには含まれていません。**
-そのため、いくらこのコマンドでVLMを賢くしても、最終的な軌道出力のバイアスは解消されないのです。
+> [!TIP]
+> **パイプラインの動作確認 (Pilot Run)**
+> いきなり全データを処理するのではなく、まずは少量のデータでエラーなくパイプラインが通るか確認することを強く推奨します。
+> ```bash
+> # 動作確認用: 10サンプルのみ抽出
+> python scripts/finetuning/prepare_training_data.py data/debug.pt --samples 10 --split train
+> 
+> # 動作確認用: 1エポックだけ学習
+> python scripts/finetuning/train_trajectory_decoder.py --data_path data/debug.pt --output_dir ./debug_ckpt --epochs 1 --batch_size 2
+> ```
+
+本番データの作成:
+```bash
+# 学習データ (Train Split: 90%)
+# --samples 1000 は「1000クリップ (約5.5時間分)」を意味します
+python scripts/finetuning/prepare_training_data.py data/training_data.pt --samples 1000 --split train
+
+# 評価データ (Val Split: 10%)
+python scripts/finetuning/prepare_training_data.py data/val_data.pt --samples 100 --split val
+```
+
+*   **Dataset Note**: 公開されている `nvidia/PhysicalAI-Autonomous-Vehicles` は、Alpamayo R1 の "Evaluation Dataset" としてModel Cardに記載されています（学習は非公開の80k時間データ）。
+    > **Training Dataset:**
+    > - Image Training Data Size: More than 1 Billion Images (from **80,000 hours** of multi-camera driving data)
+    > - Non-Audio, Image, Text Training Data Size: Trajectory data: **80,000 hours** at 10Hz sampling rate
+    >
+    > **Quantitative Evaluation Benchmarks:**
+    > - Open-Loop Evaluation on the [PhysicalAI-AV Dataset](https://huggingface.co/datasets/nvidia/PhysicalAI-Autonomous-Vehicles): minADE_6 at 6.4s of 0.85m.
+
+
+*   **Splittingの仕組み**:
+    *   **「100個に1個」のような定期的 (Index) な分割ではありません。**
+    *   各データのClip IDをハッシュ化して 0〜99 の値を算出し、その値が **0〜89ならTrain**、**90〜99ならVal** と振り分けています（擬似的なランダム分割）。
+    *   これにより、特定の順番に依存せず、データ全体から公平に90%と10%を抽出しています。
+    *   `--split train` と `--split val` は互いに排他なので、学習と評価のデータが混ざることはありません。
+*   **処理内容**:
+    *   指定した Split に属するデータを抽出し、.pt ファイルを作成します。
+
+#### Step 2: 学習の実行 (Training)
+Trajectory Decoder (Diffusion Head) のみを再学習させます。
+作成した `scripts/finetuning/train_trajectory_decoder.py` を使用します。
+
+```bash
+# 使用法: python scripts/finetuning/train_trajectory_decoder.py --data_path <pt_file>
+python scripts/finetuning/train_trajectory_decoder.py \
+    --data_path data/training_data.pt \
+    --output_dir ./checkpoints \
+    --epochs 10 \
+    --batch_size 4
+```
+
+*   **学習の仕組み**:
+    *   **VLM Backbone (Freeze)**: 重みを固定し、画像と言語の理解能力（脳）はそのまま維持します。
+    *   **Diffusion Head (Train)**: ここだけを学習対象とします。
+    *   **Objective**: Flow Matching Loss を最小化し、単眼画像の特徴から正解軌道を生成できるように矯正します。
+
+#### Step 3: 評価の実行 (Evaluation)
+学習した重みをロードし、未学習のテストデータ（カーブ等）に対して推論を行い、直進バイアスが解消されたかを確認します。
+新たに作成した `scripts/finetuning/evaluate_trajectory_decoder.py` を使用します。
+
+```bash
+# 使用法: python scripts/finetuning/evaluate_trajectory_decoder.py --data_path <val_pt_file> --ckpt_path <ckpt_file>
+python scripts/finetuning/evaluate_trajectory_decoder.py \
+    --data_path data/val_data.pt \
+    --ckpt_path ./checkpoints/ckpt_epoch_9.pt \
+    --output_dir ./eval_results \
+    --num_samples 10
+```
+
+1.  **評価の仕組み**:
+    *   スクリプト内でベースモデル (`nvidia/Alpamayo-R1-10B`) をロードします。
+    *   指定されたチェックポイントから、**Diffusion Headの重みのみ** を上書きロードします。
+    *   Valデータに対して推論（軌道生成）を実行し、正解軌道との比較プロットを `eval_results/` に保存します。
+
+2.  **定性評価 (Visualization)**:
+    *   `eval_results/*.png` を確認し、単眼入力のみで白線に沿ったカーブ軌道が生成されているかチェックします。
+    *   従来の「直進し続ける」挙動が改善されているかを視覚的に判断します。
+
+この手順により、モデルは「単眼画像から得られる視覚情報（白線の曲がり具合など）」に強く依存して軌道を生成するように矯正され、情報の欠損による「とりあえず直進」というバイアスが解消されます。
+
+#### Q. Trajectory Decoder の追加学習で、単眼でも適切な軌道を出力できるか？
