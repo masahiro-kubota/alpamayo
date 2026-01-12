@@ -72,10 +72,6 @@ python scan_all_curves.py --threshold 0.05 --max_clips 500 --output trajectory_b
 #### 1-2. 分布と視覚的確認
 特定されたクリップの傾向を可視化し、画像で内容を確認します。
 
-```bash
-# 特徴的なクリップを可視化（分布グラフとサンプル画像の生成）
-python visualize_curvature_distribution.py --results trajectory_bias_experiment/logs/curve_scan_500samples.json --output_dir trajectory_bias_experiment/images
-```
 
 **出力画像**:
 - **曲率分布の可視化**: 高曲率（急カーブ）のデータは非常に希少であることがわかります。

@@ -1,5 +1,7 @@
 # Alpamayo R1 を finetuningする (Finetuning Alpamayo R1)
 
+## 1. 目的（問題意識・課題感）
+- **課題**: Alpamayo-R1 が単眼カメラ構成などの情報不足時に「頑なに直進する（直進バイアス）」問題を、Diffusion Trajectory Decoder の学習（Fine-tuning）によって解決する。
 ## TL;DR
 **「直進バイアス」の修正に、Cosmos Cookbook は使用できない。**
 Cookbook は VLM (Brain) のテキスト生成学習用であり、Alpamayo の直進バイアスの主因である Trajectory Decoder (Diffusion Head) を学習する機能を持たないため。
@@ -113,7 +115,26 @@ Alpamayo は単なる VLM ではなく、**「脳 (VLM) + 手足 (Diffusion)」�
 ### (Solution) Trajectory Decoder の追加学習手順
 Cookbook は使用せず、今回作成した独自の学習スクリプトを用いて学習を実施します。
 
-#### Step 0: 環境構築 (Environment Setup)
+- **解決策**: 「前方画像」と「正解の旋回軌道」をペアにして拡散モデルを再学習させ、視覚情報（白線等）から適切な曲率を導き出せるように矯正する。
+
+---
+
+## Part 2: 実装・実行ガイド (Implementation Guide)
+
+### 1. 実験ディレクトリ構成 (Directory Structure)
+
+全ての成果物は `trajectory_bias_experiment/` 配下に集約して管理します。
+
+```text
+trajectory_bias_experiment/
+├── data/           # 実験専用に抽出されたデータセット (*.pt)
+├── checkpoints/    # 学習済みチェックポイント (*.pt)
+├── logs/           # 推論結果のメタデータ付き詳細ログ (*.json)
+├── images/         # 比較レポート・可視化画像 (*.png)
+└── documents/      # 実験ノート・ドキュメント (finetuning.md 等)
+```
+
+### 2. 環境構築と要件 (Step 0: Environment Setup)
 
 > [!CAUTION]
 > **24GB GPUでは学習不可能 (2025-01-12 検証済み)**
@@ -158,21 +179,160 @@ uv add datasets
 export PYTHONPATH=$PYTHONPATH:$(pwd)/src
 ```
 
-#### Step 1: データセットの準備 (Data Prep)
+### 3. 今回の検証手順: パイロットラン (Pilot Run)
+
+本格的な学習の前に、少量のデータで「直進バイアスの解消」が視覚的に確認できるか検証します。
+
+### Step 1: 高曲率クリップの特定と抽出
+データセットから「急カーブ」を自動検出し、評価用ベンチマークセットを作成します。
+
+- **出力物:**
+    - `trajectory_bias_experiment/data/eval_large_curve_full.pt`: 急カーブ（理想・4カメ全て表示）
+    - `trajectory_bias_experiment/data/eval_large_curve_masked.pt`: 急カーブ（現状・左右カメラを黒塗り）
+
+```bash
+# 1-1. 急カーブの特定 (最初の500クリップをスキャン)
+python scan_all_curves.py --threshold 0.05 --max_clips 500 \
+    --output trajectory_bias_experiment/logs/curve_scan_500samples.json
+
+# 1-2. 上位5件のIDを使用してデータを抽出 (本当のカーブ地点を自動でサンプリング)
+CLIP_IDS="09312f4a-c618-46a8-a8ff-1db37e043b5d,297615c4-dae9-40b6-9051-309ef3dcb02d,559ac095-5325-4a2d-a13c-08944d35d106,df0687d0-a2a3-4534-95e0-164f02bec8af,7a22a3d6-1156-427f-b8d6-ac379c6f9acb"
+
+python scripts/finetuning/prepare_training_data.py \
+    trajectory_bias_experiment/data/eval_large_curve_full.pt --no_mask --clip_ids "$CLIP_IDS"
+
+python scripts/finetuning/prepare_training_data.py \
+    trajectory_bias_experiment/data/eval_large_curve_masked.pt --clip_ids "$CLIP_IDS"
+```
+
+### Step 2: 訓練用および通常評価用のデータ準備
+上記ベンチマーク以外のクリップから、動作確認用のセットを作成します。
+
+- **出力物:**
+    - `trajectory_bias_experiment/data/train_debug.pt`: 訓練データ (10サンプル)
+    - `trajectory_bias_experiment/data/val_debug.pt`: 評価データ (1サンプル)
+
+```bash
+python scripts/finetuning/prepare_training_data.py trajectory_bias_experiment/data/train_debug.pt --samples 10 --split train
+python scripts/finetuning/prepare_training_data.py trajectory_bias_experiment/data/val_debug.pt --samples 1 --split val
+```
+
+> [!NOTE]
+> **訓練データの作成方法 (Data Curation Strategy)**
+>
+> 現在の実装 (`prepare_training_data.py`) と論文の手法には差異があります。
+>
+> **1. 現在の実装 (Pilot Implementation)**
+> 20秒のクリップ内で **「曲率 (Curvature) が最大になる瞬間」** を1点だけ特定し、その前後を切り出して学習データとします。
+> これは「直進バイアス」を解消するために、最もカーブがきつい場面を優先的に学習させるための簡易的な戦略です。
+>
+> **2. Alpamayo-R1 論文の手法 (Ideal Strategy)**
+> 論文では、単にカーブだけでなく「意思決定の瞬間」をすべて抽出します。
+>
+> *   **Reactive Scenarios (即応的判断)**:
+>     > "a keyframe is typically chosen by applying a short temporal buffer (approximately **0.5 seconds**) before the ego vehicle initiates a behavior change corresponding to a driving decision."
+>     > (自車が運転判断に対応する挙動変化を開始する約0.5秒前をキーフレームとして選択する)
+>
+> *   **Auto-Labeling (自動抽出)**:
+>     > "treat the frame at which a **meta action transition occurs** as a decision-making moment, allowing us to determine the keyframe automatically and efficiently across large scale data."
+>     > (メタアクションの遷移が発生するフレームを意思決定の瞬間として扱い、大規模データから効率的にキーフレームを決定する)
+
+### Step 2.5: 学習前のベースライン評価 (Baseline Evaluation)
+比較の基準となる「未学習モデル」の結果を JSON (メタデータ付き) で取得します。
+
+- **出力物 (JSONログ):**
+    - `trajectory_bias_experiment/logs/eval_val_debug_baseline.json`: 通常Valのベースライン
+    - `trajectory_bias_experiment/logs/eval_baseline_full.json`: 急カーブ(理想)の結果
+    - `trajectory_bias_experiment/logs/eval_baseline_masked.json`: 急カーブ(現状)の結果
+
+```bash
+# 通常評価用
+python scripts/finetuning/evaluate_trajectory_decoder.py \
+    --data_path trajectory_bias_experiment/data/val_debug.pt \
+    --ckpt_path None \
+    --output_json trajectory_bias_experiment/logs/eval_val_debug_baseline.json
+
+# 高曲率ベンチマーク用 (統合スクリプト)
+python scripts/finetuning/run_comparison_benchmark.py \
+    --full_data trajectory_bias_experiment/data/eval_large_curve_full.pt \
+    --masked_data trajectory_bias_experiment/data/eval_large_curve_masked.pt \
+    --ckpt_path None \
+    --output_dir trajectory_bias_experiment
+```
+
+### Step 3: パイロット学習の実行 (Training)
+Diffusion Head のみを再学習させます。
+
+- **出力物:**
+    - `trajectory_bias_experiment/checkpoints/ckpt_epoch_9.pt`
+
+```bash
+python scripts/finetuning/train_trajectory_decoder.py \
+    --data_path trajectory_bias_experiment/data/train_debug.pt \
+    --output_dir trajectory_bias_experiment/checkpoints \
+    --epochs 10 \
+    --batch_size 1
+```
+
+### Step 4: 学習後の評価実行 (FT Evaluation)
+統合スクリプトは、Step 2.5 で作成されたベースライン JSON を自動で検出し、FT の結果だけを追加推論して比較します。
+
+- **出力物 (JSONログ):**
+    - `trajectory_bias_experiment/logs/eval_val_debug_ft.json`: 通常Valの改善後
+    - `trajectory_bias_experiment/logs/eval_ft_ckpt_epoch_9.json`: 急カーブの改善後
+
+```bash
+# 通常評価
+python scripts/finetuning/evaluate_trajectory_decoder.py \
+    --data_path trajectory_bias_experiment/data/val_debug.pt \
+    --ckpt_path trajectory_bias_experiment/checkpoints/ckpt_epoch_9.pt \
+    --output_json trajectory_bias_experiment/logs/eval_val_debug_ft.json
+
+# 高曲率ベンチマーク
+python scripts/finetuning/run_comparison_benchmark.py \
+    --full_data trajectory_bias_experiment/data/eval_large_curve_full.pt \
+    --masked_data trajectory_bias_experiment/data/eval_large_curve_masked.pt \
+    --ckpt_path trajectory_bias_experiment/checkpoints/ckpt_epoch_9.pt \
+    --output_dir trajectory_bias_experiment
+```
+
+### Step 5: 推論結果の可視化 (Visualization)
+JSON に保存されたメタデータと座標データを元に、比較レポート画像を生成します。
+
+- **出力物 (PNG画像):**
+    - `trajectory_bias_experiment/images/val_debug_comparison.png`: 通常シーン(1枚)の前後比較
+    - `trajectory_bias_experiment/images/benchmark_vs_ckpt_epoch_9.png`: 急カーブ(5枚)の3構成比較
+
+```bash
+# 5-1. 通常シーンの比較
+python scripts/finetuning/visualize_eval_results.py \
+    --results_jsons trajectory_bias_experiment/logs/eval_val_debug_baseline.json,trajectory_bias_experiment/logs/eval_val_debug_ft.json \
+    --labels "Original","Fine-tuned" \
+    --data_path trajectory_bias_experiment/data/val_debug.pt \
+    --output_file trajectory_bias_experiment/images/val_debug_comparison.png
+
+# 5-2. 急カーブベンチマークの比較
+python scripts/finetuning/visualize_eval_results.py \
+    --results_jsons trajectory_bias_experiment/logs/eval_baseline_full.json,trajectory_bias_experiment/logs/eval_baseline_masked.json,trajectory_bias_experiment/logs/eval_ft_ckpt_epoch_9.json \
+    --labels "Original (Full)","Original (Masked)","FT-Pilot" \
+    --data_path trajectory_bias_experiment/data/eval_large_curve_full.pt \
+    --output_file trajectory_bias_experiment/images/benchmark_vs_ckpt_epoch_9.png
+```
+
+---
+
+### 4. 基本的な実行手順 (Standard Workflow)
+
 Hugging Face 上の `nvidia/PhysicalAI-Autonomous-Vehicles` データセットから、学習データを抽出・作成します。
+
+#### Step 1: データセットの準備 (Data Prep)
 
 > [!TIP]
 > **パイプラインの動作確認 (Pilot Run)**
 > いきなり全データを処理するのではなく、まずは少量のデータでエラーなくパイプラインが通るか確認することを強く推奨します。
-> ```bash
-> # 動作確認用: 10サンプルのみ抽出
-> python scripts/finetuning/prepare_training_data.py data/debug.pt --samples 10 --split train
-> 
-> # 動作確認用: 1エポックだけ学習
-> python scripts/finetuning/train_trajectory_decoder.py --data_path data/debug.pt --output_dir ./debug_ckpt --epochs 1 --batch_size 2
-> ```
+> 詳細は前述の「パイロットラン」セクションを参照してください。
 
-本番データの作成:
+本番データの作成例:
 ```bash
 # 学習データ (Train Split: 90%)
 # --samples 1000 は「1000クリップ (約5.5時間分)」を意味します
@@ -182,26 +342,12 @@ python scripts/finetuning/prepare_training_data.py data/training_data.pt --sampl
 python scripts/finetuning/prepare_training_data.py data/val_data.pt --samples 100 --split val
 ```
 
-*   **Dataset Note**: 公開されている `nvidia/PhysicalAI-Autonomous-Vehicles` は、Alpamayo R1 の "Evaluation Dataset" としてModel Cardに記載されています（学習は非公開の80k時間データ）。
-    > **Training Dataset:**
-    > - Image Training Data Size: More than 1 Billion Images (from **80,000 hours** of multi-camera driving data)
-    > - Non-Audio, Image, Text Training Data Size: Trajectory data: **80,000 hours** at 10Hz sampling rate
-    >
-    > **Quantitative Evaluation Benchmarks:**
-    > - Open-Loop Evaluation on the [PhysicalAI-AV Dataset](https://huggingface.co/datasets/nvidia/PhysicalAI-Autonomous-Vehicles): minADE_6 at 6.4s of 0.85m.
-
-
-*   **Splittingの仕組み**:
-    *   **「100個に1個」のような定期的 (Index) な分割ではありません。**
-    *   各データのClip IDをハッシュ化して 0〜99 の値を算出し、その値が **0〜89ならTrain**、**90〜99ならVal** と振り分けています（擬似的なランダム分割）。
-    *   これにより、特定の順番に依存せず、データ全体から公平に90%と10%を抽出しています。
-    *   `--split train` と `--split val` は互いに排他なので、学習と評価のデータが混ざることはありません。
-*   **処理内容**:
-    *   指定した Split に属するデータを抽出し、.pt ファイルを作成します。
+*   **処理内容**: 指定した Split に属するデータを抽出し、.pt ファイルを作成します。
+*   **Splitting**: Clip IDのハッシュ値(0-99)に基づき、0-89をTrain、90-99をValとして分割します。
 
 #### Step 2: 学習の実行 (Training)
+
 Trajectory Decoder (Diffusion Head) のみを再学習させます。
-作成した `scripts/finetuning/train_trajectory_decoder.py` を使用します。
 
 ```bash
 # 使用法: python scripts/finetuning/train_trajectory_decoder.py --data_path <pt_file>
@@ -212,14 +358,12 @@ python scripts/finetuning/train_trajectory_decoder.py \
     --batch_size 4
 ```
 
-*   **学習の仕組み**:
-    *   **VLM Backbone (Freeze)**: 重みを固定し、画像と言語の理解能力（脳）はそのまま維持します。
-    *   **Diffusion Head (Train)**: ここだけを学習対象とします。
-    *   **Objective**: Flow Matching Loss を最小化し、単眼画像の特徴から正解軌道を生成できるように矯正します。
+*   **VLM Backbone (Freeze)**: 画像・言語理解能力は維持。
+*   **Diffusion Head (Train)**: Flow Matching Loss (MSE) を最小化して学習。
 
 #### Step 3: 評価の実行 (Evaluation)
-学習した重みをロードし、未学習のテストデータ（カーブ等）に対して推論を行い、直進バイアスが解消されたかを確認します。
-新たに作成した `scripts/finetuning/evaluate_trajectory_decoder.py` を使用します。
+
+学習した重みをロードし、未学習のテストデータ（カーブ等）に対して推論を行います。
 
 ```bash
 # 使用法: python scripts/finetuning/evaluate_trajectory_decoder.py --data_path <val_pt_file> --ckpt_path <ckpt_file>
@@ -231,14 +375,53 @@ python scripts/finetuning/evaluate_trajectory_decoder.py \
 ```
 
 1.  **評価の仕組み**:
-    *   スクリプト内でベースモデル (`nvidia/Alpamayo-R1-10B`) をロードします。
-    *   指定されたチェックポイントから、**Diffusion Headの重みのみ** を上書きロードします。
-    *   Valデータに対して推論（軌道生成）を実行し、正解軌道との比較プロットを `eval_results/` に保存します。
+    *   ベースモデル (`nvidia/Alpamayo-R1-10B`) をロード。
+    *   指定されたチェックポイントから **Diffusion Headの重みのみ** を上書きロード。
+    *   推論結果を描画して保存。
 
-2.  **定性評価 (Visualization)**:
-    *   `eval_results/*.png` を確認し、単眼入力のみで白線に沿ったカーブ軌道が生成されているかチェックします。
-    *   従来の「直進し続ける」挙動が改善されているかを視覚的に判断します。
+---
 
-この手順により、モデルは「単眼画像から得られる視覚情報（白線の曲がり具合など）」に強く依存して軌道を生成するように矯正され、情報の欠損による「とりあえず直進」というバイアスが解消されます。
+## 5. 本番学習の実施 (Full Fine-tuning)
 
-#### Q. Trajectory Decoder の追加学習で、単眼でも適切な軌道を出力できるか？
+パイロット学習で「曲がれる」ようになったことを確認後、規模を拡大します。
+
+1.  **データ準備 (1000サンプル)**: `trajectory_bias_experiment/data/training_data_full.pt`
+2.  **本番学習 (10エポック)**: チェックポイントを `trajectory_bias_experiment/checkpoints/full_ft/` に保存。
+3.  **ベンチマーク評価**: `run_comparison_benchmark.py` を使用して、全クリップでの ADE/FDE などの傾向を視覚的に確認。
+
+---
+
+## 6. 補足: JSON メタデータの活用
+生成される JSON には、以下の情報が自動的に記録されます。
+- `model_id`: ベースとしたモデル名
+- `ckpt_path`: 使用した学習済み重み
+- `data_path`: 推論に使用したデータセット
+- `parameters`: 推論時の Temperature 等のパラメータ
+
+`run_comparison_benchmark.py` はこの情報をチェックするため、**同じデータ・同じ重みでの評価が既にある場合は推論をスキップ** し、一瞬で可視化フェーズに移行できます。
+
+---
+
+## 7. トラブルシューティング (Troubleshooting)
+
+### Q: `RuntimeError: PytorchStreamWriter failed` during save
+チェックポイント保存時に発生する場合、GPUメモリ上のテンソルを直接保存しようとして同期エラーやディスクI/Oのタイムアウトが起きている可能性があります。
+`torch.save` の前に `v.cpu()` で重みをCPUに移動させてください。
+
+### Q: `TypeError: linspace() ...` in Qwen3-VL forward
+バッチサイズ > 1 の学習時に発生します。`pixel_values` や `image_grid_thw` を `torch.stack` ではなく `torch.cat` で結合する必要があります（Qwen3-VLの実装依存）。
+
+### Q: `AttributeError: 'Interpolator' object has no attribute ...`
+`get_clip_feature` で取得する `egomotion` オブジェクトの属性は以下のようにアクセスします：
+- 曲率生データ: `egos.curvature` (NumPy Array)
+- 速度など: `egos.velocity` (NumPy Array)
+**`.linear` などの属性は存在しません。**
+
+### Q: `RuntimeError: mat1 and mat2 must have the same dtype`
+モデルが `bfloat16` でロードされている場合、Diffusionに入力する `x_t` や `timesteps` も明示的に `.to(dtype=model.dtype)` でキャストする必要があります。
+
+### Q: `RuntimeError: The size of tensor a (2) must match ... b (3)`
+モデルの出力次元（2D: x,y）とデータの次元（3D: x,y,z）が不一致の場合に発生します。loss計算前にターゲット `u_t` を `u_t[..., :out_dim]` のようにスライスして次元を合わせてください。
+
+### Q: `TypeError: ... missing 1 required positional argument: 'timesteps'`
+`action_in_proj` (PerWaypointActionInProjV2) には `timesteps` 引数が必要です。`(B, 1)` の形状で `timesteps=t` として渡してください。

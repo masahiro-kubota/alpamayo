@@ -82,6 +82,7 @@ class FlowMatching(BaseDiffusion):
                 device=device,
                 return_all_steps=return_all_steps,
                 inference_step=inference_step,
+                **kwargs,
             )
         else:
             raise ValueError(f"Invalid integration method: {int_method}")
@@ -93,6 +94,7 @@ class FlowMatching(BaseDiffusion):
         device: torch.device = torch.device("cpu"),
         return_all_steps: bool = False,
         inference_step: int | None = None,
+        dtype: torch.dtype | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Euler integration for flow matching.
 
@@ -102,14 +104,15 @@ class FlowMatching(BaseDiffusion):
             device: The device to use.
             return_all_steps: Whether to return all steps.
             inference_step: The inference step.
+            dtype: The dtype for the tensors. If None, uses default (float32).
 
         Returns:
             torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
                 The final sampled tensor [B, *x_dims] if return_all_steps is False,
                 otherwise a tuple of all sampled tensors [B, T, *x_dims] and the time steps [T].
         """
-        x = torch.randn(batch_size, *self.x_dims, device=device)
-        time_steps = torch.linspace(0.0, 1.0, inference_step + 1, device=device)
+        x = torch.randn(batch_size, *self.x_dims, device=device, dtype=dtype)
+        time_steps = torch.linspace(0.0, 1.0, inference_step + 1, device=device, dtype=dtype)
         n_dim = len(self.x_dims)
         if return_all_steps:
             all_steps = [x]

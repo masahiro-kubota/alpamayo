@@ -246,7 +246,7 @@ class AlpamayoR1(ReasoningVLA):
         # modify the attention_masks to remove padding tokens
         attention_mask = torch.zeros(
             (b_star, 1, n_diffusion_tokens, prompt_cache.get_seq_length() + n_diffusion_tokens),
-            dtype=torch.float32,
+            dtype=self.expert.dtype,
             device=device,
         )
         for i in range(b_star):
@@ -301,6 +301,7 @@ class AlpamayoR1(ReasoningVLA):
             step_fn=step_fn,
             device=device,
             return_all_steps=False,
+            dtype=self.expert.dtype,
             **diffusion_kwargs,
         )
         print(f"[DEBUG] Diffusion sampling finished.")

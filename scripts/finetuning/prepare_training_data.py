@@ -10,6 +10,7 @@ import argparse
 import os
 import sys
 import hashlib
+import time
 from pathlib import Path
 
 import torch
@@ -32,7 +33,7 @@ def get_split(uuid_str: str, train_ratio: float = 0.9) -> str:
     return "train" if (hash_val % 100) < (train_ratio * 100) else "val"
 
 
-def process_dataset(output_path: str, num_samples: int = 10, target_split: str = "train"):
+def process_dataset(output_path: str, num_samples: int = 10, target_split: str = "train", target_clip_ids: list[str] = None, no_mask: bool = False):
     """Process the PhysicalAI-AV dataset and save training data."""
     
     print(f"Initializing PhysicalAIAVDatasetInterface...")
@@ -55,11 +56,18 @@ def process_dataset(output_path: str, num_samples: int = 10, target_split: str =
     skipped_count = 0
     
     # Iterate through clips
-    clip_ids = dataset.clip_index.index.tolist()
+    if target_clip_ids:
+        # Use specific clip IDs but filter only those actually in the dataset
+        all_available_ids = set(dataset.clip_index.index.tolist())
+        clip_ids = [cid for cid in target_clip_ids if cid in all_available_ids]
+        num_samples = len(clip_ids)
+        print(f"Targeting {len(clip_ids)} specific clips.")
+    else:
+        clip_ids = dataset.clip_index.index.tolist()
     
     for clip_id in clip_ids:
-        # Check split
-        if get_split(clip_id) != target_split:
+        # Check split if not explicitly targeting IDs
+        if not target_clip_ids and get_split(clip_id) != target_split:
             continue
             
         # Check if front camera is available
@@ -86,76 +94,105 @@ def process_dataset(output_path: str, num_samples: int = 10, target_split: str =
                 continue
             
             # Choose a reference timestamp (middle of clip to ensure history/future exist)
-            # Alpamayo uses 10Hz: 1.6s history (16 frames), 6.4s future (64 frames)
-            # Timestamps are in microseconds
+            min_ts = timestamps.min()
+            max_ts = timestamps.max()
+            ref_ts = (min_ts + max_ts) // 2
+            # This initial ref_ts is not used if max curvature logic is applied
+            # min_ts = timestamps.min()
+            # max_ts = timestamps.max()
+            # ref_ts = (min_ts + max_ts) // 2
+            
+            # Durations
             hist_duration_us = 1_600_000  # 1.6s
             fut_duration_us = 6_400_000   # 6.4s
             
-            min_ts = timestamps.min()
-            max_ts = timestamps.max()
+            # 1. Find the point of maximum curvature in the clip
+            egomotion_interp = dataset.get_clip_feature(clip_id, "egomotion")
             
-            ref_ts = (min_ts + max_ts) // 2
+            # Use official attributes of the Interpolator
+            min_ts, max_ts = egomotion_interp.time_range
+            scan_ts = np.arange(min_ts + 2_000_000, max_ts - 7_000_000, 100_000) # Buffer for history/future
             
-            # Ensure we have enough history and future
-            if ref_ts - hist_duration_us < min_ts or ref_ts + fut_duration_us > max_ts:
-                print(f"  Skipping {clip_id}: clip too short")
-                video_reader.close()
-                continue
+            if len(scan_ts) < 10:
+                 ref_ts = min_ts + 5_000_000
+            else:
+                egos = egomotion_interp(scan_ts)
+                # egos.curvature is a numpy array of shape (N, 1) or (N,)
+                curv_data = np.abs(egos.curvature).flatten()
+                
+                max_idx = np.argmax(curv_data)
+                ref_ts = scan_ts[max_idx]
+                print(f"  -> Max curvature {curv_data[max_idx]:.4f} found at {ref_ts/1e6:.1f}s")
+
+            # 2. Extract Images at ref_ts
+            # Generate timestamps for images: 4 frames at 10Hz [t0-0.3s, t0-0.2s, t0-0.1s, t0]
+            img_duration_us = 300_000 # 0.3s
+            img_timestamps = np.linspace(ref_ts - img_duration_us, ref_ts, 4, dtype=np.int64)
             
-            # Generate timestamps for history and future at 10Hz
-            hist_timestamps = np.linspace(ref_ts - hist_duration_us, ref_ts, 16, dtype=np.int64)
-            fut_timestamps = np.linspace(ref_ts, ref_ts + fut_duration_us, 64, dtype=np.int64)
+            # 1. Front Wide
+            video_reader_wide = dataset.get_clip_feature(clip_id, "camera_front_wide_120fov")
+            imgs_wide, _ = video_reader_wide.decode_images_from_timestamps(img_timestamps)
+            video_reader_wide.close()
             
-            # Get image at reference time
-            images, actual_ts = video_reader.decode_images_from_timestamps(np.array([ref_ts], dtype=np.int64))
-            image = images[0]  # (H, W, C) numpy array
+            # 2. Front Tele
+            dataset.download_clip_features(clip_id, ["camera_front_tele_30fov"])
+            video_reader_tele = dataset.get_clip_feature(clip_id, "camera_front_tele_30fov")
+            imgs_tele, _ = video_reader_tele.decode_images_from_timestamps(img_timestamps)
+            video_reader_tele.close()
             
-            # Get egomotion at history and future timestamps
+            if no_mask:
+                # 3. Left
+                dataset.download_clip_features(clip_id, ["camera_cross_left_120fov"])
+                video_reader_left = dataset.get_clip_feature(clip_id, "camera_cross_left_120fov")
+                imgs_left, _ = video_reader_left.decode_images_from_timestamps(img_timestamps)
+                video_reader_left.close()
+                
+                # 4. Right
+                dataset.download_clip_features(clip_id, ["camera_cross_right_120fov"])
+                video_reader_right = dataset.get_clip_feature(clip_id, "camera_cross_right_120fov")
+                imgs_right, _ = video_reader_right.decode_images_from_timestamps(img_timestamps)
+                video_reader_right.close()
+            else:
+                # Create black images for Left and Right (same shape as wide)
+                black_frame = np.zeros_like(imgs_wide[0])
+                imgs_left = np.stack([black_frame] * 4)
+                imgs_right = np.stack([black_frame] * 4)
+            
+            # Arrange in Alpamayo-R1 order: Left, FrontWide, Right, FrontTele (each 4 frames)
+            # This matches load_physical_aiavdataset.py indices [0, 1, 2, 6]
+            all_imgs_np = np.concatenate([imgs_left, imgs_wide, imgs_right, imgs_tele], axis=0)
+            # all_imgs_np: (16, H, W, 3)
+            
+            # Trajectory History & Future
+            hist_timestamps = np.linspace(ref_ts - 1_500_000, ref_ts, 16, dtype=np.int64)
+            fut_timestamps = np.linspace(ref_ts + 100_000, ref_ts + 6_400_000, 64, dtype=np.int64)
+            
             hist_ego = egomotion_interp(hist_timestamps)
             fut_ego = egomotion_interp(fut_timestamps)
             
-            # Extract pose (position and rotation)
-            # hist_ego.pose is RigidTransform with .translation (N, 3) and .rotation
-            hist_xyz = torch.tensor(hist_ego.pose.translation, dtype=torch.float32)  # (16, 3)
-            hist_rot = torch.tensor(hist_ego.pose.rotation.as_matrix(), dtype=torch.float32)  # (16, 3, 3)
+            hist_xyz = torch.tensor(hist_ego.pose.translation, dtype=torch.float32)
+            hist_rot = torch.tensor(hist_ego.pose.rotation.as_matrix(), dtype=torch.float32)
+            fut_xyz = torch.tensor(fut_ego.pose.translation, dtype=torch.float32)
+            fut_rot = torch.tensor(fut_ego.pose.rotation.as_matrix(), dtype=torch.float32)
             
-            fut_xyz = torch.tensor(fut_ego.pose.translation, dtype=torch.float32)  # (64, 3)
-            fut_rot = torch.tensor(fut_ego.pose.rotation.as_matrix(), dtype=torch.float32)  # (64, 3, 3)
-            
-            # Convert image to PIL for processor
             from PIL import Image
-            pil_image = Image.fromarray(image)
+            pil_images = [Image.fromarray(img) for img in all_imgs_np]
             
-            # Create VLM input using same format as helper.create_message
+            # VLM Prompt
             num_traj_token = 48
             hist_traj_placeholder = f"<|traj_history_start|>{'<|traj_history|>' * num_traj_token}<|traj_history_end|>"
+            
+            user_content = [{"type": "image", "image": img} for img in pil_images]
+            user_content.append({"type": "text", "text": f"{hist_traj_placeholder}output the chain-of-thought reasoning of the driving process, then output the future trajectory."})
+            
             messages = [
-                {
-                    "role": "system",
-                    "content": [{"type": "text", "text": "You are a driving assistant that generates safe and accurate actions."}],
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image", "image": pil_image},
-                        {"type": "text", "text": f"{hist_traj_placeholder}output the chain-of-thought reasoning of the driving process, then output the future trajectory."},
-                    ],
-                },
-                {
-                    "role": "assistant",
-                    "content": [{"type": "text", "text": "<|cot_start|>"}],
-                },
+                {"role": "system", "content": [{"type": "text", "text": "You are a driving assistant that generates safe and accurate actions."}]},
+                {"role": "user", "content": user_content},
+                {"role": "assistant", "content": [{"type": "text", "text": "<|cot_start|>"}]}
             ]
             
-            # Process with Qwen processor
             text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
-            inputs = processor(
-                text=[text],
-                images=[pil_image],
-                videos=None,
-                padding=True,
-                return_tensors="pt",
-            )
+            inputs = processor(text=[text], images=pil_images, videos=None, padding=True, return_tensors="pt")
             
             tokenized_data = {
                 "input_ids": inputs["input_ids"].squeeze(0),
@@ -166,12 +203,13 @@ def process_dataset(output_path: str, num_samples: int = 10, target_split: str =
             
             data_item = {
                 "tokenized_data": tokenized_data,
-                "ego_future_xyz": fut_xyz.unsqueeze(0).unsqueeze(0),  # (1, 1, 64, 3)
-                "ego_future_rot": fut_rot.unsqueeze(0).unsqueeze(0),  # (1, 1, 64, 3, 3)
-                "ego_history_xyz": hist_xyz.unsqueeze(0).unsqueeze(0),  # (1, 1, 16, 3)
-                "ego_history_rot": hist_rot.unsqueeze(0).unsqueeze(0),  # (1, 1, 16, 3, 3)
-                "split": target_split,
+                "ego_future_xyz": fut_xyz.unsqueeze(0).unsqueeze(0),
+                "ego_future_rot": fut_rot.unsqueeze(0).unsqueeze(0),
+                "ego_history_xyz": hist_xyz.unsqueeze(0).unsqueeze(0),
+                "ego_history_rot": hist_rot.unsqueeze(0).unsqueeze(0),
+                "split": target_split if not target_clip_ids else "custom",
                 "clip_id": clip_id,
+                "images_np": all_imgs_np,
             }
             
             data_list.append(data_item)
@@ -179,29 +217,36 @@ def process_dataset(output_path: str, num_samples: int = 10, target_split: str =
             print(f"  Processed {processed_count}/{num_samples} samples")
             
             video_reader.close()
-            
             if processed_count >= num_samples:
                 break
                 
         except Exception as e:
             print(f"  Error processing {clip_id}: {e}")
             skipped_count += 1
-            continue
     
-    # Save
     print(f"\nSaving {len(data_list)} samples to {output_path}")
     torch.save(data_list, output_path)
-    print(f"Done! Processed: {processed_count}, Skipped: {skipped_count}")
+    print(f"Done!")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Prepare training data for Trajectory Decoder finetuning")
-    parser.add_argument("output_pt", help="Path to output .pt file (e.g., data/debug.pt)")
+    parser.add_argument("output_pt", help="Path to output .pt file")
     parser.add_argument("--samples", type=int, default=10, help="Number of samples to extract")
     parser.add_argument("--split", type=str, choices=["train", "val"], default="train", help="Which split to extract")
+    parser.add_argument("--clip_ids", type=str, help="Comma-separated list of clip IDs to extract")
+    parser.add_argument("--no_mask", action="store_true", help="Do not mask Left/Right cameras (Full Vision)")
     args = parser.parse_args()
     
-    # Ensure output directory exists
-    os.makedirs(os.path.dirname(args.output_pt) or ".", exist_ok=True)
+    if os.path.exists(args.output_pt):
+        print(f"File {args.output_pt} already exists. Skipping data generation.", flush=True)
+        sys.exit(0)
     
-    process_dataset(args.output_pt, args.samples, args.split)
+    os.makedirs(os.path.dirname(args.output_pt) or ".", exist_ok=True)
+    clip_id_list = args.clip_ids.split(",") if args.clip_ids else None
+    
+    start_time = time.time()
+    process_dataset(args.output_pt, args.samples, args.split, clip_id_list, args.no_mask)
+    end_time = time.time()
+    
+    print(f"\nExecution time: {end_time - start_time:.2f} seconds")
