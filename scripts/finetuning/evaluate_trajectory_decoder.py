@@ -3,122 +3,151 @@ import argparse
 import sys
 import os
 import torch
+import json
 import numpy as np
-import matplotlib.pyplot as plt
 from pathlib import Path
+from typing import Any
 
 # Add src to python path
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent / "src"))
 from alpamayo_r1.models.alpamayo_r1 import AlpamayoR1
-from transformers import AutoConfig
+
+import time
 
 def load_data(pt_file):
-    data = torch.load(pt_file)
+    """Load preprocessed validation data."""
+    try:
+        data = torch.load(pt_file, weights_only=False)
+    except TypeError:
+        data = torch.load(pt_file)
     if not isinstance(data, list):
         data = [data]
     return data
 
 def evaluate(args):
     # 1. Config & Model
-    print("Loading Model...")
+    print("Loading Model...", flush=True)
     model = AlpamayoR1.from_pretrained(args.base_model, trust_remote_code=True, torch_dtype=torch.bfloat16)
     device = "cuda"
-    
     model.to(device)
     model.eval()
+    
+    # Load Checkpoint weights if provided
+    if args.ckpt_path and args.ckpt_path != "None":
+        print(f"Loading checkpoint from {args.ckpt_path}...", flush=True)
+        checkpoint = torch.load(args.ckpt_path, map_location=device)
+        if 'expert' in checkpoint:
+            model.expert.load_state_dict(checkpoint['expert'])
+            model.action_in_proj.load_state_dict(checkpoint['action_in_proj'])
+            model.action_out_proj.load_state_dict(checkpoint['action_out_proj'])
+        else:
+            model.load_state_dict(checkpoint, strict=False)
+        print("Checkpoint loaded successfully.", flush=True)
+    elif args.ckpt_path == "None":
+        print("Using original model weights (None specified).", flush=True)
 
-    # 2. Load Checkpoint (Fine-tuned Head)
-    if args.ckpt_path:
-        print(f"Loading checkpoint from {args.ckpt_path}...")
-        ckpt = torch.load(args.ckpt_path, map_location=device)
-        model.expert.load_state_dict(ckpt['expert'])
-        model.action_in_proj.load_state_dict(ckpt['action_in_proj'])
-        model.action_out_proj.load_state_dict(ckpt['action_out_proj'])
-        print("Checkpoint loaded successfully.")
-    else:
-        print("No checkpoint provided. Running with base model weights.")
-
-    # 3. Load Data
-    print(f"Loading Validation Data from {args.data_path}...")
+    # 2. Load Data
+    print(f"Loading Validation Data from {args.data_path}...", flush=True)
     dataset = load_data(args.data_path)
     
-    # 4. Inference & Visualization
-    os.makedirs(args.output_dir, exist_ok=True)
+    num_to_eval = min(len(dataset), args.num_samples)
+    indices = range(num_to_eval)
     
-    # Select a few samples
-    indices = range(min(len(dataset), args.num_samples))
-    
+    results = []
+
     for i in indices:
         item = dataset[i]
         clip_id = item.get("clip_id", f"sample_{i}")
-        print(f"Evaluating Sample {i} (Clip: {clip_id})...")
+        print(f"[{i+1}/{num_to_eval}] Evaluating Clip: {clip_id}...", flush=True)
         
-        # Move tensors to device
-        # item is a dict, need to handle nesting for sample_trajectories...
-        # The method expects 'ego_history_xyz', 'tokenized_data' directly in dict
-        
-        # Deep copy to avoid in-place modification issues if retrying
+        # Prepare Sample Data
         sample_data = {}
         for k, v in item.items():
             if isinstance(v, torch.Tensor):
                 sample_data[k] = v.to(device)
-                # Expand batch dim if needed (prepare_training_data saves as batch 1)
-                # If saved as (1, ...), it's fine.
             elif isinstance(v, dict):
-                # Handle tokenized_data dict
-                sample_data[k] = {sk: sv.to(device) if isinstance(sv, torch.Tensor) else sv for sk, sv in v.items()}
+                sample_data[k] = {}
+                for sk, sv in v.items():
+                    if isinstance(sv, torch.Tensor):
+                        tensor = sv.to(device)
+                        if sk in ['input_ids', 'attention_mask'] and tensor.dim() == 1:
+                            tensor = tensor.unsqueeze(0)
+                        elif sk == 'image_grid_thw' and tensor.dim() == 1:
+                            tensor = tensor.unsqueeze(0)
+                        sample_data[k][sk] = tensor
+                    else:
+                        sample_data[k][sk] = sv
             else:
                 sample_data[k] = v
-                
-        # Run Inference
+
+        start_time = time.time()
         with torch.no_grad():
-            # sample_trajectories... handles everything
-            # Returns: pred_xyz, pred_rot
-            # pred_xyz: (B, num_traj_sets, num_traj_samples, T, 3)
+            # Match official Nvidia parameters
             pred_xyz, pred_rot = model.sample_trajectories_from_data_with_vlm_rollout(
                 sample_data,
+                top_p=0.98,
+                temperature=0.6,
                 num_traj_samples=args.num_preds,
-                num_traj_sets=1,
-                top_p=0.9,
-                temperature=0.8
+                max_generation_length=256
             )
-            
-        # Ground Truth
-        gt_xyz = sample_data["ego_future_xyz"].cpu().numpy() # (B, 1, T, 3)
-        gt_x = gt_xyz[0, 0, :, 0]
-        gt_y = gt_xyz[0, 0, :, 1]
+        duration = time.time() - start_time
         
-        # Predictions
-        pred_xyz_np = pred_xyz.cpu().numpy() # (1, 1, N, T, 3)
+        # --- COORDINATE TRANSFORMATION ---
+        # Transform GT and History into the current ego-local frame (centered at 0,0, facing forward)
+        # to match the model's prediction space.
         
-        # Plot
-        plt.figure(figsize=(10, 10))
-        plt.plot(gt_x, gt_y, 'g-', linewidth=3, label='Ground Truth')
+        # Get current pose (last step of history)
+        curr_xyz = sample_data["ego_history_xyz"][0, 0, -1:]   # (1, 3)
+        curr_rot = sample_data["ego_history_rot"][0, 0, -1]     # (3, 3) - ego to world
         
-        # Plot predictions
-        for n in range(args.num_preds):
-            pred_x = pred_xyz_np[0, 0, n, :, 0]
-            pred_y = pred_xyz_np[0, 0, n, :, 1]
-            plt.plot(pred_x, pred_y, 'b--', alpha=0.5, label='Prediction' if n==0 else "")
-            
-        plt.title(f"Trajectory Prediction - Clip {clip_id}")
-        plt.xlabel("X (m)")
-        plt.ylabel("Y (m)")
-        plt.legend()
-        plt.grid(True)
-        plt.axis('equal')
+        # World to Local transformation: p_local = R.T @ (p_world - t)
+        # In matrix form with (T, 3) points: P_local = (P_world - T) @ R
+        gt_future_world = sample_data["ego_future_xyz"][0, 0] # (Tf, 3)
+        history_world = sample_data["ego_history_xyz"][0, 0]   # (Th, 3)
         
-        save_path = os.path.join(args.output_dir, f"eval_{clip_id}.png")
-        plt.savefig(save_path)
-        plt.close()
-        print(f"Saved plot to {save_path}")
+        gt_future_local = (gt_future_world - curr_xyz) @ curr_rot
+        history_local = (history_world - curr_xyz) @ curr_rot
+        
+        # Serialize result
+        result_item = {
+            "clip_id": clip_id,
+            "duration_sec": duration,
+            "gt_future": gt_future_local.cpu().numpy().tolist(),
+            "history": history_local.cpu().numpy().tolist(),
+            "predictions": pred_xyz.cpu().numpy()[0, 0].tolist() # (num_preds, T, 3)
+        }
+        results.append(result_item)
+        print(f"  -> Done in {duration:.2f} seconds.", flush=True)
+
+    # Save to JSON
+    os.makedirs(os.path.dirname(args.output_json), exist_ok=True) if os.path.dirname(args.output_json) else None
+    # Create Output Structure with Metadata
+    output_data = {
+        "metadata": {
+            "model_id": args.base_model,
+            "ckpt_path": str(args.ckpt_path),
+            "data_path": args.data_path,
+            "num_samples": num_to_eval,
+            "parameters": {
+                "temperature": 0.6,
+                "top_p": 0.98,
+                "max_generation_length": 256
+            },
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        },
+        "results": results
+    }
+
+    with open(args.output_json, 'w') as f:
+        json.dump(output_data, f, indent=2)
+    print(f"\\nFinal results with metadata saved to {args.output_json}", flush=True)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_path", type=str, required=True, help="Path to validation .pt file")
-    parser.add_argument("--ckpt_path", type=str, help="Path to checkpoint .pt file")
+    parser.add_argument("--data_path", type=str, required=True, help="Path to validation .pt data")
     parser.add_argument("--base_model", type=str, default="nvidia/Alpamayo-R1-10B")
-    parser.add_argument("--output_dir", type=str, default="./eval_results")
+    parser.add_argument("--ckpt_path", type=str, default=None, help="Optional trained head checkpoint")
+    parser.add_argument("--output_json", type=str, default="eval_results.json")
     parser.add_argument("--num_samples", type=int, default=5)
     parser.add_argument("--num_preds", type=int, default=3)
     args = parser.parse_args()
