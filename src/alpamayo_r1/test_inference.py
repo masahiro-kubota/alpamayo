@@ -52,6 +52,9 @@ model_inputs = {
 model_inputs = helper.to_device(model_inputs, "cuda")
 
 torch.cuda.manual_seed_all(42)
+
+import time
+t0 = time.perf_counter()
 with torch.autocast("cuda", dtype=torch.bfloat16):
     pred_xyz, pred_rot, extra = model.sample_trajectories_from_data_with_vlm_rollout(
         data=model_inputs,
@@ -61,6 +64,8 @@ with torch.autocast("cuda", dtype=torch.bfloat16):
         max_generation_length=256,
         return_extra=True,
     )
+t1 = time.perf_counter()
+print(f"External Wall Clock Time: {(t1 - t0) * 1000:.2f} ms")
 
 # the size is [batch_size, num_traj_sets, num_traj_samples]
 print("Chain-of-Causation (per trajectory):\n", extra["cot"][0])

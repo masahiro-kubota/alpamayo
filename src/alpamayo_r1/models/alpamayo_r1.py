@@ -21,6 +21,7 @@ import einops
 import hydra.utils as hyu
 import numpy as np
 import torch
+import time
 from transformers import AutoConfig, AutoModel, StoppingCriteriaList
 from transformers.generation.logits_process import LogitsProcessor, LogitsProcessorList
 
@@ -36,6 +37,21 @@ from alpamayo_r1.models.token_utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class TimingLogitsProcessor(LogitsProcessor):
+    """LogitsProcessor that records the time of the first invocation."""
+
+    def __init__(self):
+        super().__init__()
+        self.first_token_time = None
+        self.events = [torch.cuda.Event(enable_timing=True)]
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+        if self.first_token_time is None:
+            self.events[0].record()
+            self.first_token_time = time.time()  # Fallback/Debug
+        return scores
 
 
 class ExpertLogitsProcessor(LogitsProcessor):
@@ -162,7 +178,16 @@ class AlpamayoR1(ReasoningVLA):
         input_ids = self.fuse_traj_tokens(input_ids, traj_data_vlm)
         device = input_ids.device
         
-        print(f"[DEBUG] input_ids fused. shape: {input_ids.shape}")
+        # print(f"[DEBUG] input_ids fused. shape: {input_ids.shape}")
+
+        # Timing Events
+        t_start = torch.cuda.Event(enable_timing=True)
+        t_prefill_end = torch.cuda.Event(enable_timing=True) # Will be captured by TimingLogitsProcessor
+        t_vlm_end = torch.cuda.Event(enable_timing=True)
+        t_diff_start = torch.cuda.Event(enable_timing=True)
+        t_diff_end = torch.cuda.Event(enable_timing=True)
+
+        t_start.record()
 
         # 1) run autoregressive generation for the VLM
         max_generation_length = kwargs.get(
@@ -185,15 +210,18 @@ class AlpamayoR1(ReasoningVLA):
         # because the KV cache is updated after the next token is generated
         eos_token_id = self.tokenizer.convert_tokens_to_ids(to_special_token("traj_future_start"))
         stopping_criteria = StoppingCriteriaList([StopAfterEOS(eos_token_id=eos_token_id)])
+        
+        timing_processor = TimingLogitsProcessor()
         logits_processor = LogitsProcessorList(
             [
+                timing_processor,
                 ExpertLogitsProcessor(
                     traj_token_offset=self.config.traj_token_start_idx,
                     traj_vocab_size=self.config.traj_vocab_size,
                 )
             ]
         )
-        print("[DEBUG] Generating tokens...")
+        # print("[DEBUG] Generating tokens...")
         vlm_outputs = self.vlm.generate(
             input_ids=input_ids,
             generation_config=generation_config,
@@ -201,7 +229,8 @@ class AlpamayoR1(ReasoningVLA):
             logits_processor=logits_processor,
             **tokenized_data,
         )
-        print("[DEBUG] VLM generation finished.")
+        t_vlm_end.record()
+        # print("[DEBUG] VLM generation finished.")
         vlm_outputs.rope_deltas = self.vlm.model.rope_deltas
 
         # manually replace padding after EOS token
@@ -295,7 +324,8 @@ class AlpamayoR1(ReasoningVLA):
         if diffusion_kwargs is None:
             diffusion_kwargs = {}
 
-        print(f"[DEBUG] Starting diffusion sampling. Batch size: {total_batch}")
+        # print(f"[DEBUG] Starting diffusion sampling. Batch size: {total_batch}")
+        t_diff_start.record()
         sampled_action = self.diffusion.sample(
             batch_size=total_batch,
             step_fn=step_fn,
@@ -304,7 +334,35 @@ class AlpamayoR1(ReasoningVLA):
             dtype=self.expert.dtype,
             **diffusion_kwargs,
         )
-        print(f"[DEBUG] Diffusion sampling finished.")
+        t_diff_end.record()
+        # print(f"[DEBUG] Diffusion sampling finished.")
+        
+        # --- Report Timing ---
+        torch.cuda.synchronize()
+        if hasattr(timing_processor, 'events') and timing_processor.events:
+            t_prefill_end = timing_processor.events[0]
+            
+            prefill_ms = t_start.elapsed_time(t_prefill_end)
+            reasoning_ms = t_prefill_end.elapsed_time(t_vlm_end)
+            diffusion_ms = t_diff_start.elapsed_time(t_diff_end)
+            total_ms = t_start.elapsed_time(t_diff_end) # This includes gaps between phases, which is good
+            
+            # Note: t_start -> t_vlm_end covers VLM. 
+            # Gap between t_vlm_end and t_diff_start is overhead (processing outputs, preparing diffusion).
+            overhead_ms = t_vlm_end.elapsed_time(t_diff_start)
+            
+            print("\n" + "="*60)
+            print(f"Alpamayo R1 Inference Timing Breakdown")
+            print("="*60)
+            print(f"{'Phase':<30} | {'Time (ms)':>10}")
+            print("-" * 44)
+            print(f"{'Prefilling (+Vision)':<30} | {prefill_ms:>10.2f} ms")
+            print(f"{'Reasoning Decoding':<30} | {reasoning_ms:>10.2f} ms")
+            print(f"{'Trajectory Decoding (Flow)':<30} | {diffusion_ms:>10.2f} ms")
+            print(f"{'Overhead (between phases)':<30} | {overhead_ms:>10.2f} ms")
+            print("-" * 44)
+            print(f"{'Total End-to-End':<30} | {prefill_ms + reasoning_ms + diffusion_ms + overhead_ms:>10.2f} ms")
+            print("="*60 + "\n")
 
         # Repeat history to align with num_traj_samples
         hist_xyz_rep = einops.repeat(
