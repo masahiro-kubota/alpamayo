@@ -53,19 +53,45 @@ model_inputs = helper.to_device(model_inputs, "cuda")
 
 torch.cuda.manual_seed_all(42)
 
+# Warmup loop to filter out initialization/JIT overhead.
+# 1. CUDA Kernels compilation (JIT)
+# 2. Memory Allocation (Caching Allocator)
+# 3. Cache Warming
+num_warmup = 3
+num_test = 1
+import copy
+
+print(f"Running {num_warmup} warmup iterations...")
+for i in range(num_warmup):
+    print(f"Warmup iteration {i+1}/{num_warmup}...")
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        # Create a fresh copy of input data to prevent in-place modifications (e.g. pop) from breaking subsequent runs
+        iter_inputs = copy.deepcopy(model_inputs)
+        _ = model.sample_trajectories_from_data_with_vlm_rollout(
+            data=iter_inputs,
+            top_p=0.98,
+            temperature=0.6,
+            num_traj_samples=1,
+            max_generation_length=256,
+            return_extra=False,
+        )
+    torch.cuda.synchronize()
+
+print("Starting measurement run...")
 import time
 t0 = time.perf_counter()
 with torch.autocast("cuda", dtype=torch.bfloat16):
+    iter_inputs = copy.deepcopy(model_inputs)
     pred_xyz, pred_rot, extra = model.sample_trajectories_from_data_with_vlm_rollout(
-        data=model_inputs,
+        data=iter_inputs,
         top_p=0.98,
         temperature=0.6,
         num_traj_samples=1,  # Feel free to raise this for more output trajectories and CoC traces.
         max_generation_length=256,
-        return_extra=True,
+        return_extra=True,  # Only need extra for the final run
     )
 t1 = time.perf_counter()
-print(f"External Wall Clock Time: {(t1 - t0) * 1000:.2f} ms")
+print(f"External Wall Clock Time (Hot Run): {(t1 - t0) * 1000:.2f} ms")
 
 # the size is [batch_size, num_traj_sets, num_traj_samples]
 print("Chain-of-Causation (per trajectory):\n", extra["cot"][0])
