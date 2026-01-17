@@ -30,6 +30,17 @@ AR1は、Alpamayo-VAを拡張したモジュラーVLAアーキテクチャです
     *   **3.2.1 ビジョンエンコーディング**: マルチカメラ・マルチタイムステップの入力を効率的に処理するため、標準的なシングルイメージトークナイゼーションに加え、TriplaneやFlexといった効率的な手法もサポートし、トークン数を削減します。
     *   **3.2.2 軌道デコーディング**: ユニサイクルダイナミクスに基づく制御表現（加速度、曲率）を採用。推論時には、離散トークンではなく、フロー・マッチング（Flow Matching）に基づく「アクションエキスパート」を用いて、連続的かつマルチモーダルな軌道を高速に生成します。
 
+**Alpamayo-R1-10B パラメータ内訳**:
+
+| コンポーネント | パラメータ数 | 備考 |
+|---------------|-------------|------|
+| **Cosmos-Reason-7B** | ~7B | VLM全体 |
+| - Vision Encoder (ViT) | 676M | [Cosmos-Reason1 Table 3](file:///home/masa/alpamayo/paper/cosmos-reason1/cosmos-reason1.txt#L527) |
+| - Projector | （小） | 2層MLPダウンサンプリング |
+| - LLM Backbone | ~6.3B | Transformer 28層 |
+| **Diffusion Trajectory Decoder** | **2B** | フロー・マッチングベース |
+| **合計** | ~9B | 「10B」は概算表記 |
+
 ## 4. Chain of Causation (CoC) データセット (Chain of Causation Dataset)
 **内容まとめ**:
 既存データの課題（曖昧さ、表層的な推論、因果的混乱）に対処するため、構造化されたラベリングフレームワークを開発しました。
